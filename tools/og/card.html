@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Link preview card</title>
+<!-- Rendered to site/og.png at 1200x627 by tools/make_og.mjs. Not published.
+     Rule for this card: it is seen at ~550px wide (desktop feed) and ~400px (phone),
+     so nothing smaller than 30px here, which is ~10px on a phone. -->
+<style>
+@font-face { font-family: "Plex Cond"; font-weight: 700; src: url("../../site/fonts/ibm-plex-sans-condensed-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Plex Cond"; font-weight: 600; src: url("../../site/fonts/ibm-plex-sans-condensed-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Plex Cond"; font-weight: 500; src: url("../../site/fonts/ibm-plex-sans-condensed-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Plex Mono"; font-weight: 500; src: url("../../site/fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2"); }
+:root { --paper: #f6f7f5; --panel: #ffffff; --ink: #17232b; --muted: #4c5a61; --rule: #d9dedc; --accent: #c42f26; --pass: #1f7a4d; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1200px; height: 627px; overflow: hidden; background: var(--paper); color: var(--ink); }
+body { display: grid; grid-template-columns: 1fr 470px; grid-template-rows: 56px 1fr; font-family: "Plex Cond", "Arial Narrow", sans-serif; }
+.bar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; padding: 0 48px;
+  background: var(--panel); border-bottom: 2px solid var(--rule); font-family: "Plex Mono", monospace; font-weight: 500; font-size: 30px; }
+.bar .ok { color: var(--pass); }
+.bar .url { color: var(--muted); }
+.left { padding: 34px 0 0 48px; display: flex; flex-direction: column; }
+h1 { margin: 0; font-size: 104px; line-height: .95; font-weight: 700; letter-spacing: -.01em; }
+.role { margin-top: 14px; font-size: 40px; font-weight: 600; color: var(--muted); line-height: 1.15; }
+.role b { color: var(--accent); font-weight: 600; }
+.stats { margin-top: auto; margin-bottom: 40px; display: grid; grid-template-columns: repeat(3, auto); gap: 0 40px; justify-content: start; }
+.stat .n { font-size: 76px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.stat .l { font-size: 31px; font-weight: 500; color: var(--muted); margin-top: 6px; }
+.right { padding: 28px 40px 40px 0; }
+iframe { width: 100%; height: 100%; border: 0; border-radius: 10px; display: block; background: #0d1220; }
+</style>
+</head>
+<body>
+  <div class="bar"><span class="ok">● 29 cases passed · 0 failed</span><span class="url">alfaguy-bg.github.io</span></div>
+  <div class="left">
+    <h1>Georgi<br>Krastev</h1>
+    <div class="role">QA Team Lead · <b>ISTQB</b><br>Advanced Test Manager</div>
+    <div class="stats">
+      <div class="stat"><div class="n">11+</div><div class="l">years in QA</div></div>
+      <div class="stat"><div class="n">6</div><div class="l">engineers led</div></div>
+      <div class="stat"><div class="n">1,927</div><div class="l">tests on my AI tool</div></div>
+    </div>
+  </div>
+  <div class="right"><iframe src="../../site/ladybug.html" title="ladybug"></iframe></div>
+</body>
+</html>

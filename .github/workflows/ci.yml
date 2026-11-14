@@ -77,3 +77,11 @@ jobs:
           path: site            # only the site is published, never tests or tools
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Check the live site is ours, not a Jekyll build
+        run: |
+          sleep 20
+          html=$(curl -fsSL "https://alfaguy-bg.github.io/?v=${GITHUB_SHA}")
+          echo "$html" | grep -q 'class="runbar"' || { echo "Live site is not site/index.html"; exit 1; }
+          if echo "$html" | grep -q 'name="generator" content="Jekyll'; then echo "Jekyll is serving the README"; exit 1; fi
+          curl -fsI "https://alfaguy-bg.github.io/og.png" | grep -qi 'content-type: image/png'
