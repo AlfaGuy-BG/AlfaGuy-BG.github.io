@@ -131,3 +131,17 @@ test("the public ladybug has no debug hook", async ({ page }) => {
   await page.goto("/ladybug.html?debug=1");
   expect(await page.evaluate(() => typeof window.__avatar)).toBe("undefined");
 });
+
+test("link previews (LinkedIn, Slack, Teams) get a title, description and a 1200x627 image", async ({ page, request }) => {
+  await page.goto("/");
+  const og = async (p) => page.locator(`meta[property="og:${p}"]`).getAttribute("content");
+  expect(await og("title")).toContain("Georgi Krastev");
+  expect((await og("description")).length).toBeGreaterThan(40);
+  const img = new URL(await og("image"));
+  expect(img.href).toBe("https://alfaguy-bg.github.io/og.png");
+  const r = await request.get(img.pathname);
+  expect(r.status()).toBe(200);
+  const b = await r.body();
+  expect(b.subarray(1, 4).toString()).toBe("PNG");
+  expect([b.readUInt32BE(16), b.readUInt32BE(20)]).toEqual([1200, 627]);
+});

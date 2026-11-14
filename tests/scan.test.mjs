@@ -94,3 +94,9 @@ test("font files are skipped, other binaries are still flagged", () => {
   writeFileSync(join(d, "b.pdf"), Buffer.from([0x25, 0x50]));
   assert.deepEqual(scanDir(d).map((f) => f.rule), ["file:not-text"]);
 });
+
+test("only the reviewed preview image is skipped; any other image is flagged", () => {
+  const d = mkdtempSync(join(tmpdir(), "scan-"));
+  writeFileSync(join(d, "shot.png"), Buffer.from([0x89, 0x50]));
+  assert.deepEqual(scanDir(d).map((f) => f.rule), ["file:not-text"]);
+});

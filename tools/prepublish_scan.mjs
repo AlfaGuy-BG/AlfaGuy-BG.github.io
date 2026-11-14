@@ -12,6 +12,8 @@ import { join, relative, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BINARY_OK = new Set([".woff2"]);
+// Images are only allowed by exact path, after a person has looked at them (a screenshot can show anything).
+const REVIEWED_IMAGES = new Set(["site/og.png"]);
 const TEXT_EXT = new Set([".html", ".htm", ".js", ".mjs", ".css", ".json", ".md", ".txt", ".svg", ".xml", ".yml", ".yaml"]);
 
 // Ticket-key shaped strings that are not ticket keys.
@@ -81,6 +83,7 @@ export function scanDir(dir, opts = {}) {
   for (const file of walk(dir)) {
     const rel = relative(process.cwd(), file).replaceAll("\\", "/");
     if (BINARY_OK.has(extname(file).toLowerCase())) continue;   // fonts: no text to leak
+    if (REVIEWED_IMAGES.has(rel)) continue;                     // images a person has looked at
     if (!TEXT_EXT.has(extname(file).toLowerCase())) {
       out.push({ file: rel, rule: "file:not-text", line: 0, match: "binary or unknown file type: review by hand" });
       continue;
