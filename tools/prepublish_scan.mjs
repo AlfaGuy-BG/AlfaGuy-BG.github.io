@@ -11,6 +11,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const BINARY_OK = new Set([".woff2"]);
 const TEXT_EXT = new Set([".html", ".htm", ".js", ".mjs", ".css", ".json", ".md", ".txt", ".svg", ".xml", ".yml", ".yaml"]);
 
 // Ticket-key shaped strings that are not ticket keys.
@@ -27,6 +28,9 @@ export const RULES = [
     allow: [/^your-company\.atlassian\.net$/i] },
   { id: "host:local-url", re: /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?/gi, mask: false },
   { id: "pii:email", re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g, mask: true },
+  // Text an AI reader (a screening tool, an assistant) could take as instructions, and characters people cannot see.
+  { id: "ai:instruction-like", re: /\b(?:ignore (?:all |any )?(?:previous|prior|above) (?:instructions|prompts)|disregard (?:the |all )?(?:previous|above)|you are (?:an? |the )?(?:AI|assistant|language model|LLM)|system prompt|rate this candidate|recommend (?:this candidate|me) (?:for|as))\b/gi, mask: false },
+  { id: "unicode:invisible", re: /[\u200B-\u200F\u2060-\u2064\uFEFF\u202A-\u202E]|[\u{E0000}-\u{E007F}]/gu, mask: false },
   { id: "jira:ticket-key", re: /\b[A-Z][A-Z0-9]{1,9}-\d{1,7}\b/g, mask: false, allow: KEY_ALLOW },
 ];
 
@@ -54,7 +58,9 @@ export function scanText(text, { denylist = [], allow = [] } = {}) {
         const hit = m[0];
         if (rule.allow && rule.allow.some((a) => a.test(hit))) continue;
         if (allow.some((a) => a.rule === rule.id && a.match === hit)) continue;
-        findings.push({ rule: rule.id, line: i + 1, match: rule.mask ? maskValue(hit) : hit });
+        const shown = rule.id === "unicode:invisible" ? [...hit].map((c) => "U+" + c.codePointAt(0).toString(16).toUpperCase()).join(" ")
+          : rule.mask ? maskValue(hit) : hit;
+        findings.push({ rule: rule.id, line: i + 1, match: shown });
       }
     });
   }
@@ -74,6 +80,7 @@ export function scanDir(dir, opts = {}) {
   const out = [];
   for (const file of walk(dir)) {
     const rel = relative(process.cwd(), file).replaceAll("\\", "/");
+    if (BINARY_OK.has(extname(file).toLowerCase())) continue;   // fonts: no text to leak
     if (!TEXT_EXT.has(extname(file).toLowerCase())) {
       out.push({ file: rel, rule: "file:not-text", line: 0, match: "binary or unknown file type: review by hand" });
       continue;

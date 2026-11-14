@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-0HjDX1kqq8CLg9BflK2IPxwjNKAsa7V7vXWmgF9xSow='; style-src 'sha256-Iz6IfgAZ1Dkb+qZ1FJC/YLbpdulkrKU1OQ7wZea7GEU='; connect-src 'none'; base-uri 'none'; form-action 'none'; img-src data: blob:">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ladybug demo</title>
 <!--
@@ -245,7 +246,7 @@ DECISION: chosen  -> hand-written WebGL2 (~250 lines), zero external scripts.
   const raf = window.requestAnimationFrame.bind(window);
   window.requestAnimationFrame = (cb) => raf(function wait(t) { if (paused) raf(wait); else cb(t); });
   window.addEventListener("message", (e) => {
-    if (e.source !== window.parent || !e.data || typeof e.data.ladybug !== "string") return;
+    if (e.source !== window.parent || e.origin !== location.origin || !e.data || typeof e.data.ladybug !== "string") return;
     paused = e.data.ladybug === "pause";
   });
 })();
@@ -1516,7 +1517,7 @@ function startGL(gl) {
   // manual mode: the browser's frame loop stops rendering and advance() renders frames at a fixed rate of
   // simulated time, so measurements don't depend on how fast (or throttled) the browser runs
   const dbg = { manual: false };
-  if (params.has("debug")) window.__avatar = { cloth, cur, hero, toBody, collar, HS, get links() { return cloth.links; },
+  if (false) window.__avatar = {   // public copy: the ?debug=1 hook is switched off cloth, cur, hero, toBody, collar, HS, get links() { return cloth.links; },
     NU: CAPE_NU, NV: CAPE_NV, LEN: CAPE_LEN,
     LIE, BED, BEACH_EYE,
     beach(t = 0) {

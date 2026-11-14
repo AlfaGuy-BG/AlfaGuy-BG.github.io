@@ -12,12 +12,17 @@ badge turns red and nothing new is published.
 
 | Check | Where | Runs |
 |---|---|---|
-| Secrets, real ticket keys, internal hosts, e-mail addresses, private terms | `tools/prepublish_scan.mjs` (+ 11 unit tests) | every push, PR, night |
+| Secrets, real ticket keys, internal hosts, e-mail addresses, private terms, text an AI could take as instructions, invisible characters | `tools/prepublish_scan.mjs` | every push, PR, night |
+| Content Security Policy present and matching every inline script and style | `tools/csp.mjs` | every push, PR, night |
+| Unit tests for the scanner, the CSP tool and the AI reader's scoring (24) | `node --test` | every push, PR, night |
 | Secrets anywhere in git history | gitleaks | every push, PR, night |
 | Title and name, no page errors | Playwright | desktop + mobile |
 | The run summary ("6 suites · 29 cases") matches what the page actually lists | Playwright | desktop + mobile |
 | No sideways scrolling | Playwright | desktop + mobile |
-| The page only talks to itself and Google Fonts; never to a local agent server | Playwright | desktop + mobile |
+| The page only talks to itself: no third parties (fonts are self-hosted), never a local agent server | Playwright | desktop + mobile |
+| The CSP blocks nothing the page needs; no `unsafe-inline` / `unsafe-eval` | Playwright | desktop + mobile |
+| Every font is served from the site | Playwright | desktop + mobile |
+| The public ladybug has no debug hook | Playwright | desktop + mobile |
 | Reduced motion: static ladybug, the 3D scene never loads | Playwright | desktop + mobile |
 | WebGL2: the live ladybug fills its frame | Playwright | desktop + mobile |
 | `ladybug.html` missing: the drawing stays, nothing breaks | Playwright | desktop + mobile |
@@ -31,9 +36,22 @@ Only `site/` is published. Tests and tools never reach GitHub Pages.
 ```powershell
 npm install                          # once; creates package-lock.json: commit it
 npx playwright install chromium      # once
-npm test                             # scanner tests, scan, then the browser tests
+npm run fonts                        # once, and after font updates; commit site/fonts
+npm test                             # unit tests, scan, then the browser tests
 npm run serve                        # view the site at http://127.0.0.1:4173
 ```
+
+## After editing a script or style
+
+The CSP allows inline code by its hash, so every change to a `<script>` or `<style>` needs `npm run csp`.
+The tests fail with "CSP is out of date" if you forget.
+
+## AI reader check (manual)
+
+Does an AI screening tool read this page correctly? `npm run ai-reader` gives the page to a model through the
+Claude Code CLI, then plain code scores the answer against 10 fixed facts and 3 kinds of invention (a degree the page
+never mentions, tools I don't list, wrong years). Every run needs 9/10 facts and nothing invented. Answers are saved
+in `test-results/`. Use `--model haiku` to test what a cheap screener sees, `--runs 5`, `--url https://alfaguy-bg.github.io`.
 
 ## Private terms
 

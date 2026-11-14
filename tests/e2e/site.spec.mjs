@@ -2,7 +2,7 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
-const ALLOWED_HOSTS = new Set(["127.0.0.1:4173", "fonts.googleapis.com", "fonts.gstatic.com"]);
+const ALLOWED_HOSTS = new Set(["127.0.0.1:4173"]);   // no third party at all, fonts included
 
 function watch(page) {
   const errors = [], requests = [];
@@ -46,7 +46,7 @@ test("no sideways scrolling at this viewport", async ({ page }) => {
   expect(overflow).toBeLessThanOrEqual(1);
 });
 
-test("the page talks only to itself and Google Fonts (never to a local agent server)", async ({ page }) => {
+test("the page talks only to itself (no third parties, never a local agent server)", async ({ page }) => {
   const w = watch(page);
   await page.goto("/");
   await page.waitForTimeout(3000);   // let the ladybug start and run a few demo events
@@ -100,4 +100,34 @@ test("external links are https and the profile links point to the right places",
   const hrefs = await page.locator("a[href]").evaluateAll((as) => as.map((a) => a.getAttribute("href")));
   for (const h of hrefs.filter((h) => !h.startsWith("#"))) expect(h, h).toMatch(/^https:\/\//);
   expect(hrefs).toContain("https://www.linkedin.com/in/georgi-krastev-qa/");
+});
+
+test("the Content Security Policy blocks nothing the page needs", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__csp = [];
+    document.addEventListener("securitypolicyviolation", (e) => window.__csp.push(`${e.violatedDirective} ${e.blockedURI}`));
+  });
+  await page.goto("/");
+  await page.waitForTimeout(3000);
+  const frames = page.frames();
+  const violations = [];
+  for (const f of frames) violations.push(...(await f.evaluate(() => window.__csp || []).catch(() => [])));
+  expect(violations).toEqual([]);
+  const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  expect(csp).toMatch(/^default-src 'none'/);
+  expect(csp).not.toMatch(/unsafe-inline|unsafe-eval/);
+});
+
+test("every font the page asks for is served from the site", async ({ page }) => {
+  const fonts = [];
+  page.on("response", (r) => { if (r.request().resourceType() === "font") fonts.push(`${r.status()} ${new URL(r.url()).pathname}`); });
+  await page.goto("/");
+  await page.evaluate(() => document.fonts.ready);
+  expect(fonts.length, "no fonts were requested: run npm run fonts").toBeGreaterThan(0);
+  expect(fonts.filter((f) => !f.startsWith("200 /fonts/"))).toEqual([]);
+});
+
+test("the public ladybug has no debug hook", async ({ page }) => {
+  await page.goto("/ladybug.html?debug=1");
+  expect(await page.evaluate(() => typeof window.__avatar)).toBe("undefined");
 });
