@@ -1,0 +1,6 @@
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+# private terms for the pre-publish scan: never commit
+.denylist

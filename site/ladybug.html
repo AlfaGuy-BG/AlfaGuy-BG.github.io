@@ -1,0 +1,1799 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ladybug demo</title>
+<!--
+DECISION: chosen  -> hand-written WebGL2 (~250 lines), zero external scripts.
+          rejected -> three.js from a CDN.
+          why      -> the end goal is fully local; the page must work offline, and CSP can
+                      then forbid every external origin.
+-->
+<style>
+  :root {
+    --bg-1: #0d1220; --bg-2: #18213a; --panel: #111827cc; --line: #ffffff1a;
+    --text: #e5e7eb; --muted: #9ca3af; --accent: #6ea8fe;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(42% 48% at 32% 52%, #2a3a63 0%, #2a3a6300 100%),
+                radial-gradient(120% 90% at 30% 20%, var(--bg-2), var(--bg-1));
+    color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-columns: 1fr; overflow: hidden;
+  }
+  /* left: the scene on top, the Matrix panel under it. Right (app only): the chat, all the way down */
+  #left { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  #left #stage { flex: 1 1 auto; }
+  #stage { position: relative; min-height: 0; --chill: 0; }
+  #stage::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none; opacity: var(--chill);
+    background: radial-gradient(30% 30% at 22% 18%, #fff4c2cc, #fff4c200 70%),
+                linear-gradient(#5fb8f5 0%, #9fd8fb 45%, #ffe1b0 72%, #f8c68c 100%);
+  }
+  canvas { position: relative; z-index: 1; width: 100%; height: 100%; display: block; }
+  #bubble {
+    position: absolute; z-index: 2; left: 50%; top: 14px; transform: translateX(-50%);
+    max-width: min(560px, 86%); padding: 12px 16px; border-radius: 14px;
+    background: #ffffffee; color: #111827; font-weight: 500; box-shadow: 0 8px 30px #0006;
+    transition: opacity .25s, background-color .25s; overflow-wrap: anywhere;
+  }
+  #bubble::after {
+    content: ""; position: absolute; left: 50%; bottom: -9px; transform: translateX(-50%);
+    border: 9px solid transparent; border-bottom: 0; border-top-color: inherit;
+  }
+  #bubble.warn { background: #fef3c7; } #bubble.bad { background: #fee2e2; } #bubble.good { background: #d1fae5; }
+  #bubble:empty { opacity: 0; }
+  #nogl { position: absolute; inset: auto 0 12% 0; text-align: center; color: var(--muted); display: none; }
+  aside {
+    background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column;
+    min-height: 0; backdrop-filter: blur(6px);
+  }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header .title { font-weight: 650; font-size: 15px; letter-spacing: .2px; }
+  .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  #conn { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  #conn i { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; display: inline-block; }
+  #conn.on i { background: #34d399; } #conn.err i { background: #f87171; }
+
+  /* ---- the Matrix panel: what the assistant calls, live. Green on black, faint code rain behind the lines ---- */
+  #matrix { --mx: #39ff6a; --mx-dim: #1f9d45; --mx-hi: #c8ffd6;
+            position: relative; flex: 0 0 34vh; min-height: 150px; display: flex; flex-direction: column; overflow: hidden;
+            background: #010803; border-top: 1px solid #00ff4140; color: var(--mx);
+            font: 12.5px/1.5 "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace; }
+  #rain { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; opacity: .32; pointer-events: none; }
+  #matrix > :not(#rain) { position: relative; z-index: 1; }
+  .mx-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 7px 12px;
+             background: #010803d9; border-bottom: 1px solid #00ff4126; text-shadow: 0 0 6px #00ff4180; }
+  #state { text-transform: uppercase; letter-spacing: 2px; font-weight: 700; color: var(--mx-hi); }
+  .mx-stats { color: var(--mx-dim); white-space: nowrap; } .mx-stats b { color: var(--mx); font-weight: 700; }
+  #log { list-style: none; margin: 0; padding: 6px 0; overflow: auto; flex: 1; min-height: 0;
+         scrollbar-width: thin; scrollbar-color: #1f9d45 transparent; }
+  #log li { padding: 1px 12px; display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; gap: 8px; }
+  #log time { color: var(--mx-dim); font-variant-numeric: tabular-nums; }
+  #log .line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+               animation: mxtype .45s steps(28, end) both; text-shadow: 0 0 5px #00ff4166; }
+  @keyframes mxtype { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+  #log .t { color: var(--mx-hi); font-weight: 700; } #log .d { color: var(--mx); opacity: .8; margin-left: 8px; }
+  #log .st { color: var(--mx-dim); } #log .st.ok { color: var(--mx); } #log .st.bad { color: #ff5f5f; }
+  #log .st.wait::after { content: "▌"; animation: mxblink 1s steps(1) infinite; }
+  @keyframes mxblink { 50% { opacity: 0; } }
+  #log .bad .t { color: #ff5f5f; } #log .good .t { color: var(--mx); } #log .warn .t { color: #f5d75f; }
+  #log .reply { cursor: pointer; } #log .reply .line { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; } #log .reply.open .line { display: block; }
+  #log .sep .line { color: var(--mx-dim); }
+  .mx-foot { display: flex; gap: 10px; align-items: center; padding: 6px 12px 8px; background: #010803d9;
+             border-top: 1px solid #00ff4126; white-space: nowrap; overflow: hidden; }
+  #mxBar { color: var(--mx); text-shadow: 0 0 6px #00ff4199; letter-spacing: -.5px; }
+  #mxInfo { color: var(--mx-dim); overflow: hidden; text-overflow: ellipsis; }
+  @media (prefers-reduced-motion: reduce) { #log .line { animation: none; } #rain { display: none; } }
+  footer { padding: 10px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+
+  /* ---- the prompt box (only when served by the app: python -m agent.app) ---- */
+  /* the avatar viewer alone (python -m agent.avatar): the scene and the Matrix panel take the whole window */
+  body:not(.app) aside { display: none; }
+  /* DECISION: the scene keeps 7:5 in a column of its own on the left, the chat gets the rest of the width.
+     why -> the user asked for the chat to be easy to read (2026-11-02): it had a third of the width */
+  body.app { grid-template-columns: clamp(320px, 30vw, 560px) minmax(0, 1fr); }
+  body.app #left #stage { flex: 0 0 auto; aspect-ratio: 7 / 5; max-height: 52vh; }
+  body.app #matrix { flex: 1 1 auto; }
+  #chat, #composer { display: none; }
+  /* the chat reads in one centred column (long lines are hard to read); the padding centres it, tables may use it all */
+  body.app aside { --gutter: max(20px, calc((100% - 940px) / 2)); }
+  body.app #chat { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; overflow: auto;
+                   padding: 18px var(--gutter) 24px; }
+  body.app #foot { display: none; }
+  body.app #composer { display: block; padding: 12px var(--gutter) 14px; border-top: 1px solid var(--line); }
+  .msg { border-radius: 12px; padding: 12px 16px; font-size: 15px; line-height: 1.6; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; max-width: 88%; background: #6ea8fe26; border: 1px solid #6ea8fe40; white-space: pre-wrap; }
+  .msg.assistant { background: #ffffff0b; border: 1px solid var(--line); }
+  .msg.system { color: var(--muted); background: transparent; border: 1px dashed var(--line); white-space: pre-wrap; font-size: 13px; }
+  .msg.error { background: #f871711a; border: 1px solid #f8717155; }
+  .msg .meta { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .msg table { border-collapse: collapse; margin: 8px 0; font-size: 14px; display: block; overflow-x: auto; max-width: 100%; }
+  .msg th, .msg td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; min-width: 60px; }
+  .msg th { background: #ffffff0d; }
+  .msg h3, .msg h4 { margin: 12px 0 6px; font-size: 16px; } .msg p { margin: 6px 0; }
+  .msg ul, .msg ol { margin: 6px 0; padding-left: 22px; } .msg li { margin: 3px 0; }
+  .msg code { background: #ffffff14; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .msg pre { background: #0b1020; padding: 10px 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+  .msg a, #composer a, .hint a { color: var(--accent); }
+  .approve { border: 1px solid #fbbf2488; background: #fbbf2414; border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .approve dl { margin: 6px 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; }
+  .approve dt { color: var(--muted); } .approve dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
+  .approve .btns { display: flex; gap: 8px; margin-top: 8px; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  .perm { margin-top: 8px; border: 1px solid #6ea8fe66; background: #6ea8fe14; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .perm b { display: block; margin-bottom: 2px; }
+  .perm .btns, .webwarn .btns { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
+  .webwarn { margin-top: 8px; border: 1px solid #fbbf2488; background: #fbbf2414; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .webwarn q { color: var(--muted); }
+  .approve .why { margin-top: 4px; color: #fcd34d; font-size: 12px; }
+  .hint button { margin: 4px 4px 0 0; }
+  #composer textarea { width: 100%; min-height: 60px; max-height: 30vh; resize: vertical; padding: 10px 12px; border-radius: 10px;
+                       font-size: 15px !important; line-height: 1.5;
+                       border: 1px solid var(--line); background: #0b1020; color: var(--text); font: inherit; }
+  #composer textarea:focus { outline: 2px solid #6ea8fe88; border-color: transparent; }
+  #composer .bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  #attached { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 6px; border-radius: 8px;
+          border: 1px solid var(--line); background: #ffffff0c; font-size: 12px; }
+  .chip img { width: 40px; height: 28px; object-fit: cover; border-radius: 4px; }
+  .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+  .chip button { border: 0; background: none; color: var(--muted); cursor: pointer; font: inherit; padding: 0 4px; }
+  .msg .redo { margin-top: 8px; padding: 3px 10px; font-size: 12px; }
+  .msg .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  #composer.drop { outline: 2px dashed #6ea8fe; outline-offset: 4px; border-radius: 8px; }
+  #composer .bar .sp { flex: 1; }
+  .cbtn { padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: #ffffff10; color: var(--text);
+          font: inherit; font-size: 13px; cursor: pointer; }
+  .cbtn.primary { background: var(--accent); border-color: var(--accent); color: #0b1020; font-weight: 600; }
+  .cbtn.danger { border-color: #f8717188; color: #fca5a5; }
+  .cbtn:disabled { opacity: .45; cursor: default; }
+  .prog { border: 1px solid #6ea8fe66; background: #6ea8fe10; border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .prog .bar { position: relative; height: 6px; border-radius: 3px; background: #ffffff14; margin: 6px 0; overflow: hidden; }
+  .prog .bar i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  /* something is running: a light sweeps along the bar, so one long step (a single driver, a scan) never looks stuck */
+  .prog .bar s { display: none; position: absolute; top: 0; bottom: 0; left: 0; width: 30%;
+                 background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: .75;
+                 animation: progspin 1.6s ease-in-out infinite; }
+  .prog .bar.active s { display: block; }
+  @keyframes progspin { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  .prog .now { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .prog .uac { margin-top: 6px; border: 1px solid #fbbf2488; background: #fbbf2418; border-radius: 8px; padding: 6px 8px;
+               color: #fcd34d; font-size: 12.5px; }
+  .prog ul { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; }
+  .prog li { padding: 1px 0; overflow-wrap: anywhere; } .prog li.ok::before { content: "✓ "; color: #34d399; }
+  .prog li.bad::before { content: "✗ "; color: #f87171; } .prog li small { color: var(--muted); }
+  #meter { font-size: 11.5px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+  /* narrow windows: everything in one column, the chat below */
+  @media (max-width: 820px) { body, body.app { grid-template-columns: 1fr; overflow: auto; }
+    #left #stage { height: 42vh; flex: none; aspect-ratio: auto; } #matrix, body.app #matrix { flex: 0 0 26vh; }
+    body.app aside { min-height: 85vh; } }
+  #micBtn.on { background: #e5484d; color: #fff; border-color: #e5484d; }
+  /* the status line keeps its two lines of space while voice commands are on: if it grew when a hold started, the
+     button row moved up from under the pointer and the hold ended at once */
+  #heard { font-size: 12px; color: var(--muted, #8a93a6); margin: 4px 2px 0; line-height: 1.35; height: 2.7em;
+           overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  #heard[hidden] { display: none; }
+  #heard b { color: inherit; }
+
+  /* ---- the chat in the Matrix panel's style: the same green on black, set apart by a lighter panel and a glowing
+     edge. Answers keep a plain font (long text reads better); headings, labels and the box are terminal type ---- */
+  body.app aside {
+    --mx: #39ff6a; --mx-dim: #1f9d45; --mx-hi: #c8ffd6; --mono: "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+    --line: #00ff4126; --muted: #74c48c; --accent: #5cff85; --text: #dcffe6;
+    background: linear-gradient(180deg, #04170b 0%, #020e06 100%); color: var(--text);
+    border-left: 2px solid #00ff4199; box-shadow: -8px 0 28px #00ff4126, inset 10px 0 24px #00ff4110; backdrop-filter: none;
+  }
+  body.app aside header { background: #010803; border-bottom: 1px solid #00ff4140; }
+  body.app aside header .title { font-family: var(--mono); text-transform: uppercase; letter-spacing: 2.5px; color: var(--mx-hi);
+                                 text-shadow: 0 0 8px #00ff4199; }
+  body.app aside header .title::before { content: "> "; color: var(--mx); }
+  body.app aside #conn { font-family: var(--mono); }
+  body.app #chat { scrollbar-width: thin; scrollbar-color: #1f9d45 transparent; }
+  .msg.assistant { background: #00ff410a; border: 1px solid #00ff4138; box-shadow: 0 0 14px #00ff410f; }
+  .msg.user { background: #00ff411c; border: 1px solid #00ff4170; color: var(--mx-hi); font-family: var(--mono); font-size: 14px; }
+  .msg.system { border-color: #00ff4138; font-family: var(--mono); }
+  .msg.error { background: #ff5f5f14; border-color: #ff5f5f66; }
+  .msg b, .msg strong { color: #b4ffc6; }
+  .msg h3, .msg h4 { font-family: var(--mono); color: var(--mx); letter-spacing: .3px; }
+  .msg a, #composer a, .hint a { color: #7dffa0; }
+  .msg code { background: #00ff4114; color: #a6ffbf; font-family: var(--mono); }
+  .msg pre { background: #010803; border: 1px solid #00ff4126; color: #a6ffbf; font-family: var(--mono); }
+  .msg th { background: #00ff4112; color: var(--mx-hi); }
+  .msg .meta, #meter, #heard { font-family: var(--mono); color: var(--mx-dim); }
+  body.app #composer { background: #010803e6; border-top: 1px solid #00ff4140; }
+  #composer textarea { background: #010803; border-color: #00ff4140; color: var(--mx-hi); font-family: var(--mono);
+                       caret-color: var(--mx); }
+  #composer textarea::placeholder { color: #2f8a4b; }
+  #composer textarea:focus { outline: 2px solid #39ff6a80; box-shadow: 0 0 12px #00ff4133; }
+  .cbtn { background: #00ff410d; border-color: #00ff4140; color: var(--mx-hi); font-family: var(--mono); }
+  .cbtn:hover:not(:disabled) { border-color: #39ff6aaa; box-shadow: 0 0 8px #00ff4140; }
+  .cbtn.primary { background: var(--mx); border-color: var(--mx); color: #010803; }
+  .cbtn.danger { border-color: #ff5f5f88; color: #ffb4b4; background: transparent; }
+  .chip { border-color: #00ff4140; background: #00ff410d; font-family: var(--mono); }
+  .prog { border-color: #00ff4166; background: #00ff410d; }
+  .prog .bar i, .prog .bar s { background: var(--mx); }
+  .perm { border-color: #00ff4166; background: #00ff410d; }
+
+  /* portfolio embed: the scene only */
+  html body { display: block; overflow: hidden !important; }
+  html body #left { height: 100%; }
+  html body #left #stage { height: 100% !important; flex: 1 1 auto !important; aspect-ratio: auto !important; max-height: none !important; }
+  #matrix, #foot, aside, #nogl { display: none !important; }
+  #bubble { font-size: 13px; padding: 8px 12px; max-width: 88%; }
+</style>
+</head>
+<body>
+<div id="left">
+<div id="stage">
+  <canvas id="c" aria-label="Animated ladybug mascot acting out a QA run"></canvas>
+  <div id="bubble" role="status" aria-live="off"></div>
+  <div id="nogl"></div>
+</div>
+<section id="matrix" aria-hidden="true"><canvas id="rain"></canvas><span id="state"></span><b id="s-step"></b><b id="s-calls"></b><b id="s-bad"></b><ul id="log"></ul><span id="mxBar"></span><span id="mxInfo"></span></section>
+<footer id="foot"></footer>
+</div>
+<aside aria-hidden="true"><div id="conn"><i></i><span></span></div></aside>
+<script>
+"use strict";
+// Portfolio embed: the parent page pauses the scene when it is off screen (postMessage {ladybug: "pause" | "play"}).
+(() => {
+  let paused = false;
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => raf(function wait(t) { if (paused) raf(wait); else cb(t); });
+  window.addEventListener("message", (e) => {
+    if (e.source !== window.parent || !e.data || typeof e.data.ladybug !== "string") return;
+    paused = e.data.ladybug === "pause";
+  });
+})();
+// ============================================================ state machine (no DOM, no GL)
+const STATES = {
+  idle:     { label: "Idle",               color: [0.43, 0.66, 1.00] },
+  thinking: { label: "Thinking",           color: [0.65, 0.55, 0.98] },
+  reading:  { label: "Reading",            color: [0.13, 0.83, 0.93] },
+  moving:   { label: "Moving files",       color: [0.20, 0.83, 0.60] },
+  waiting:  { label: "Needs approval",     color: [0.98, 0.75, 0.14] },
+  denied:   { label: "Blocked",            color: [0.97, 0.44, 0.44] },
+  done:     { label: "Done",               color: [0.20, 0.83, 0.60] },
+  stuck:    { label: "Stopped",            color: [0.98, 0.57, 0.24] },
+};
+const BAD_PHASES = new Set(["denied", "rejected", "invalid", "conflict", "failed"]);
+// served by the app (python -m agent.app) the page gets this run's key and shows the prompt box; the plain
+// avatar viewer (python -m agent.avatar) leaves the placeholder and stays read-only
+const APP_TOKEN = "__APP_TOKEN__";
+const APP = !APP_TOKEN.startsWith("__");
+
+// the clock: real time, or (in ?debug=1 manual mode) a simulated one the checks advance frame by frame
+let simNow = null;
+const nowMs = () => simNow ?? performance.now();
+const ui = {
+  state: "idle", since: performance.now(), bubble: "", tone: "",
+  step: 0, calls: 0, bad: 0, point: false,   // point: an approval waits in the chat panel
+};
+
+// model text may carry markdown; the bubble and log show plain text
+const plain = (s) => s.replace(/\*\*|__|`/g, "");
+const DONE_LINES = ["Done. No biggie 😎", "All sorted. Easy 🍹", "Done ✓ Back to the beach"];
+// 'claude-code:claude-sonnet-5-5' -> 'sonnet 5.5' (the same as agent.modelpick.short_name)
+const modelName = (spec) => { const n = String(spec || "").split(":").slice(1).join(":") || String(spec || "");
+                              const m = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(n); return m ? `${m[1]} ${m[2]}.${m[3]}` : n.slice(0, 40); };
+const str = (v, n = 120) => (typeof v === "string" ? (v.length > n ? v.slice(0, n - 1) + "…" : v) : "");
+
+// Pure: event -> {state, bubble, tone, log:{t,d,cls}} ; untrusted strings are only ever used as text
+function interpret(ev) {
+  const a = (ev && typeof ev.args === "object" && ev.args) || {};
+  switch (ev.type) {
+    case "run_start":   return { state: "idle", bubble: "New task: " + str(ev.task, 160), log: ["run start", str(ev.task, 80)] };
+    case "model_pick":  return { log: ["model", `${modelName(ev.model)} · ${str(ev.level, 12)} · ${str(ev.why, 60)}`] };
+    case "model_switch": return { bubble: "This needs more thought: moving up a model…",
+                                  log: ["model ↑", `${modelName(ev.model)} · ${str(ev.why, 70)}`, "warn"] };
+    case "model_call":  return { state: "thinking", bubble: "Thinking…", step: ev.step, log: ["thinking", "step " + ev.step] };
+    case "model_reply":
+      return ev.tool_calls ? { log: ["plan", ev.tool_calls + " tool call(s)"] }
+                           : { bubble: "Wrapping up…", log: ["reply", plain(str(ev.text, 600)), "reply"] };
+    case "tool_start": {
+      const tier = ev.tier;
+      if (ev.tool === "move_file") {
+        return { state: "moving", calls: 1, bubble: `Moving ${str(a.src, 60)} → ${str(a.dst, 60)}`,
+                 log: ["move_file", `${str(a.src, 50)} → ${str(a.dst, 50)}` + (a.overwrite ? " (overwrite)" : ""), tier === "irreversible" ? "warn" : ""] };
+      }
+      if (ev.tool === "read_file") return { state: "reading", calls: 1, bubble: "Reading " + str(a.path, 80), log: ["read_file", str(a.path, 80)] };
+      if (ev.tool === "save_note") return { state: "reading", calls: 1, bubble: "Writing " + str(a.path, 80), log: ["save_note", str(a.path, 80) + (a.overwrite ? " (overwrite)" : ""), tier === "irreversible" ? "warn" : ""] };
+      if (ev.tool === "jira_issue") return { state: "reading", calls: 1, bubble: "Reading " + str(a.issue, 60), log: ["jira_issue", str(a.issue, 80)] };
+      if (ev.tool === "confluence_page") return { state: "reading", calls: 1, bubble: "Reading a Confluence page", log: ["confluence_page", str(a.page, 80)] };
+      if (ev.tool === "jira_search" || ev.tool === "confluence_search")
+        return { state: "reading", calls: 1, bubble: ev.tool === "jira_search" ? "Searching Jira" : "Searching Confluence",
+                 log: [ev.tool, str(a.jql || a.cql, 80)] };
+      if (ev.tool && ev.tool.startsWith("xray_")) {
+        const what = { xray_tests: "Searching tests", xray_test: "Reading test " + str(a.test, 40),
+                       xray_execution: "Checking execution " + str(a.execution, 40), xray_test_plan: "Checking test plan " + str(a.plan, 40) };
+        return { state: "reading", calls: 1, bubble: what[ev.tool] || "Reading Xray", log: [str(ev.tool, 40), str(a.jql || a.test || a.execution || a.plan, 80)] };
+      }
+      if (ev.tool === "fetch_url") return { state: "reading", calls: 1, bubble: "Reading web page " + str(a.url, 80), log: ["fetch_url", str(a.url, 80), tier === "network" ? "warn" : ""] };
+      const PC = { driver_status: "Checking drivers (up to a minute)", driver_update: "Updating drivers",
+                   app_updates: "Checking for app updates", defender_status: "Checking Defender", pc_health: "Checking this PC",
+                   draft_bug_tests: "Drafting tests with the QA Generator (dry run)", sql_databases: "Listing databases",
+                   sql_tables: "Looking up tables", sql_columns: "Reading a table's columns", sql_query: "Querying the database",
+                   sql_access: "Checking the database login" };
+      if (PC[ev.tool]) return { state: "reading", calls: 1, bubble: PC[ev.tool], log: [ev.tool, ""] };
+      if (ev.tool === "list_dir") return { state: "reading", calls: 1, bubble: "Looking in " + (str(a.path, 80) || "."), log: ["list_dir", str(a.path, 80) || "."] };
+      // a tool this page has no wording for yet: show it neutrally. Red is kept for blocked/failed results,
+      // which arrive separately in tool_end; a new tool name is not an error.
+      return { state: "reading", calls: 1, bubble: "Using " + (str(ev.tool, 40) || "a tool"), log: [str(ev.tool, 40) || "tool", ""] };
+    }
+    case "confirm_request": { const where = APP ? "the panel" : "the release meeting", arrow = APP ? " →" : "";
+      return { state: "waiting", tone: "warn", log: ["approval?", str(ev.tool, 40), "warn"],
+               bubble: (ev.tool === "draft_bug_tests" ? `Wants to run the QA Generator (dry run) — approve or decline in ${where}.`
+                     : ev.tier === "network" ? `Wants to open a web page — approve or decline in ${where}.`
+                     : /^cleanup_|^quarantine_/.test(ev.tool || "") ? `Wants to tidy up files — approve or decline in ${where}.`
+                     : /^defender_|^app_update|^driver_update/.test(ev.tool || "") ? `Wants to look after this PC — approve or decline in ${where}.`
+                     : `Irreversible action — approve or decline in ${where}.`) + arrow }; }
+    case "confirm_result":  return ev.approved ? { state: "moving", label: "Working", tone: "good", bubble: "Approved.", log: ["approved", "", "good"] }
+                                               : { state: "denied", tone: "bad", bubble: "Declined. Not doing it.", log: ["declined", "", "bad"] };
+    case "progress": {   // a long action (app updates, a scan): the bubble names the item now running
+      const total = ev.total | 0, done = ev.done | 0;
+      if (!ev.current) return total && done >= total ? { bubble: `${str(ev.title, 60)}: all ${total} done` } : null;
+      if (ev.uac) return { state: "waiting", tone: "warn", bubble: "Windows is asking for permission: click the flashing shield in the taskbar.",
+                           log: ["permission?", str(ev.current, 80), "warn"] };
+      return { state: "moving", label: "Working", bubble: (total ? `${str(ev.title, 40)} ${Math.min(done + 1, total)}/${total}: ` : "") + str(ev.current, 90),
+               log: [str(ev.title, 40) || "progress", str(ev.current, 80)] };
+    }
+    case "tool_end":
+      if (BAD_PHASES.has(ev.phase)) return { state: "denied", tone: "bad", bad: 1, bubble: `${str(ev.tool, 40)}: ${ev.phase}`, log: [ev.phase, str(ev.tool, 40), "bad"] };
+      return { log: [ev.phase === "replayed" ? "replayed" : "ok", str(ev.tool, 40), "good"] };
+    case "run_end":
+      return ev.stop_reason === "done"
+        // DECISION: the bubble stays casual; the full answer is in the side panel (and the terminal).
+        //   why -> a paragraph of summary over the beach scene reads as clutter, not as "done".
+        ? { state: "done", tone: "good", bubble: DONE_LINES[(ev.tool_calls | 0) % DONE_LINES.length], fade: 6000,
+            log: ["done", `${ev.tool_calls} calls, ${ev.iterations} steps`, "good"] }
+        : { state: "stuck", tone: "warn", bubble: "Stopped: " + str(ev.stop_reason, 40), log: ["stopped", str(ev.stop_reason, 40), "warn"] };
+    default: return null;  // unknown types are ignored, not rendered
+  }
+}
+
+// ============================================================ DOM
+const $ = (id) => document.getElementById(id);
+function render() {
+  $("state").textContent = ui.label || STATES[ui.state].label;
+  const b = $("bubble");
+  b.textContent = ui.bubble;
+  b.className = ui.tone;
+  $("s-step").textContent = ui.step; $("s-calls").textContent = ui.calls; $("s-bad").textContent = ui.bad;
+}
+// the Matrix panel prints like a terminal: newest line at the bottom; a tool's line waits ("▌") until its result
+function addLog(t, d, cls, tool) {
+  const log = $("log");
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+  const li = document.createElement("li");
+  if (cls) li.className = cls;
+  const tm = document.createElement("time");
+  tm.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+  const line = document.createElement("div"); line.className = "line";
+  const tt = document.createElement("span"); tt.className = "t"; tt.textContent = (cls === "sep" ? "" : "> ") + t;
+  const dd = document.createElement("span"); dd.className = "d"; dd.textContent = d || "";
+  line.append(tt, dd);
+  const st = document.createElement("span"); st.className = "st";
+  if (tool) { li.dataset.tool = tool; st.className = "st wait"; }
+  li.append(tm, line, st);
+  if (cls === "reply") { li.title = "Click to show the full reply"; li.onclick = () => li.classList.toggle("open"); }
+  log.append(li);
+  while (log.children.length > 150) log.firstChild.remove();
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+// a tool's result completes its own line instead of printing a new one
+function finishLog(tool, ok, phase) {
+  const open = [...$("log").querySelectorAll("li")].reverse().find((li) => li.dataset.tool === tool && li.querySelector(".st.wait"));
+  if (!open) return false;
+  const st = open.querySelector(".st");
+  st.className = "st " + (ok ? "ok" : "bad");
+  st.textContent = ok ? "OK" : String(phase || "failed").toUpperCase();
+  if (!ok) open.classList.add("bad");
+  return true;
+}
+function apply(ev) {
+  if (!ev || typeof ev.type !== "string") return;
+  if (ev.type === "run_start") Object.assign(ui, { step: 0, calls: 0, bad: 0 });
+  const r = interpret(ev);
+  if (!r) return;
+  if (r.state && r.state !== ui.state) { ui.state = r.state; ui.since = nowMs(); }
+  if (r.state) ui.label = r.label || "";   // a long action is "Working", not "Moving files", though the hero still hauls
+  if (r.bubble !== undefined) { ui.bubble = r.bubble; ui.tone = r.tone || ""; }
+  if (r.fade) { const b = ui.bubble; setTimeout(() => { if (ui.bubble === b) { ui.bubble = ""; render(); } }, r.fade); }
+  if (typeof r.step === "number") ui.step = r.step;
+  ui.calls += r.calls || 0; ui.bad += r.bad || 0;
+  if (ev.type === "run_start") addLog("──────── new task", "", "sep");
+  if (r.log && !(ev.type === "tool_end" && finishLog(ev.tool, !BAD_PHASES.has(ev.phase), ev.phase)))
+    addLog(r.log[0], r.log[1], r.log[2], ev.type === "tool_start" ? ev.tool : undefined);
+  // an approval waiting in the chat panel: the hero points at it (only the app has a panel; a Windows prompt in the
+  // taskbar is somewhere it cannot point to)
+  if (ev.type === "confirm_request") ui.point = APP;
+  else if (ev.type === "confirm_result" || ev.type === "run_end" || ev.type === "run_start") ui.point = false;
+  render();
+}
+// ---- the Matrix panel's bar: a long action's real progress, else a sweep while it works, full when done
+const mx = { live: null };   // the app's poll fills this: {busy, elapsed, live tokens, progress}
+const MX_CELLS = 22;
+function mxTick() {
+  const busyNow = !!(mx.live && mx.live.busy) || !["idle", "done", "stuck", "denied"].includes(ui.state);
+  const prog = mx.live && mx.live.progress, total = prog ? prog.total | 0 : 0;
+  let cells;
+  if (total) { const n = Math.round(MX_CELLS * Math.min(1, (prog.done | 0) / total)); cells = "█".repeat(n) + "░".repeat(MX_CELLS - n); }
+  else if (busyNow) { const at = Math.floor(performance.now() / 90) % (MX_CELLS + 6) - 6;
+    cells = Array.from({ length: MX_CELLS }, (_, i) => (i >= at && i < at + 6 ? (i === at + 5 ? "▓" : "█") : "░")).join(""); }
+  else cells = (ui.state === "done" ? "█" : "░").repeat(MX_CELLS);
+  $("mxBar").textContent = "[" + cells + "]";
+  const thousands = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "k" : String(n | 0));
+  const tok = mx.live && mx.live.live ? (mx.live.live.input_tokens | 0) + (mx.live.live.output_tokens | 0) : 0;
+  $("mxInfo").textContent = total ? `${prog.done | 0}/${total} ${prog.title || ""}`.trim()
+    : busyNow ? [mx.live ? `${Math.round(mx.live.elapsed || 0)} s` : "", tok ? `${thousands(tok)} tok` : "", "running"].filter(Boolean).join(" · ")
+    : ui.state === "done" ? "done" : "ready";
+}
+setInterval(mxTick, 120);
+// ---- the code rain behind the lines: faint, faster while it works, still when the page is hidden
+(() => {
+  const cv = $("rain"), g = cv.getContext("2d");
+  if (!g || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ0123456789:=*+<>";
+  const SIZE = 14;
+  let drops = [], last = 0;
+  function fit() {
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== w || cv.height !== h) {
+      cv.width = w; cv.height = h;
+      drops = Array.from({ length: Math.ceil(w / SIZE) }, () => Math.random() * -h / SIZE);
+    }
+  }
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const working = !!(mx.live && mx.live.busy) || !["idle", "done", "stuck", "denied"].includes(ui.state);
+    if (document.hidden || now - last < (working ? 50 : 110)) return;
+    last = now; fit();
+    g.fillStyle = "rgba(1, 8, 3, 0.16)"; g.fillRect(0, 0, cv.width, cv.height);
+    g.font = `${SIZE}px monospace`;
+    for (let i = 0; i < drops.length; i++) {
+      const y = drops[i] * SIZE;
+      g.fillStyle = Math.random() < 0.06 ? "#c8ffd6" : "#00ff41";
+      g.fillText(GLYPHS[(Math.random() * GLYPHS.length) | 0], i * SIZE, y);
+      if (y > cv.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i] += 1;
+    }
+  }
+  requestAnimationFrame(frame);
+})();
+
+function setConn(cls, text) { const c = $("conn"); c.className = cls; c.lastElementChild.textContent = text; }
+
+// ============================================================ event source
+const params = new URLSearchParams(location.search);
+{
+  setConn("on", "demo");
+  $("foot").textContent = "Demo mode: scripted events, no agent attached.";
+  const script = [
+    { type: "run_start", task: "Check the release candidate before it ships." },
+    { type: "model_call", step: 1 }, { type: "model_reply", step: 1, tool_calls: 1 },
+    { type: "tool_start", tool: "jira_search", tier: "read", args: { jql: "fixVersion = next-release" } }, { type: "tool_end", tool: "jira_search", phase: "succeeded" },
+    { type: "model_call", step: 2 }, { type: "model_reply", step: 2, tool_calls: 2 },
+    { type: "tool_start", tool: "xray_test_plan", tier: "read", args: { plan: "ABC-100" } }, { type: "tool_end", tool: "xray_test_plan", phase: "succeeded" },
+    { type: "tool_start", tool: "read_file", tier: "read", args: { path: "acceptance-criteria.md" } }, { type: "tool_end", tool: "read_file", phase: "succeeded" },
+    { type: "model_call", step: 3 }, { type: "model_reply", step: 3, tool_calls: 2 },
+    { type: "tool_start", tool: "move_file", tier: "reversible", args: { src: "draft tests", dst: "Xray / Regression" } }, { type: "tool_end", tool: "move_file", phase: "succeeded" },
+    { type: "tool_start", tool: "move_file", tier: "reversible", args: { src: "../prod/.env", dst: "loot.txt" } }, { type: "tool_end", tool: "move_file", phase: "denied" },
+    { type: "model_call", step: 4 }, { type: "model_reply", step: 4, tool_calls: 1 },
+    { type: "confirm_request", tool: "move_file", tier: "irreversible" },
+    { type: "confirm_result", tool: "move_file", approved: true }, { type: "tool_end", tool: "move_file", phase: "succeeded" },
+    { type: "model_call", step: 5 }, { type: "model_reply", step: 5, tool_calls: 0, text: "Release candidate checked. One attempt to touch production secrets was blocked." },
+    { type: "run_end", stop_reason: "done", iterations: 5, tool_calls: 6, summary: "Release candidate checked." },
+  ];
+  let i = 0;
+  const tick = () => { apply(script[i]); const dwell = script[i].type === "confirm_request" ? 3200 : script[i].type === "run_end" ? 4500 : 1500; i = (i + 1) % script.length; setTimeout(tick, dwell); };
+  tick();
+}
+render();
+
+// ============================================================ WebGL2 renderer
+const canvas = $("c");
+const gl = canvas.getContext("webgl2", { antialias: true, alpha: true, premultipliedAlpha: true });
+if (!gl) { $("nogl").style.display = "block"; }
+else startGL(gl);
+
+function startGL(gl) {
+  // ---- mat4, column-major
+  const I = () => { const m = new Float32Array(16); m[0] = m[5] = m[10] = m[15] = 1; return m; };
+  const mul = (a, b) => { const o = new Float32Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; } return o; };
+  const T = (x, y, z) => { const m = I(); m[12] = x; m[13] = y; m[14] = z; return m; };
+  const S = (x, y = x, z = x) => { const m = I(); m[0] = x; m[5] = y; m[10] = z; return m; };
+  const RX = (a) => { const c = Math.cos(a), s = Math.sin(a), m = I(); m[5] = c; m[6] = s; m[9] = -s; m[10] = c; return m; };
+  const RY = (a) => { const c = Math.cos(a), s = Math.sin(a), m = I(); m[0] = c; m[2] = -s; m[8] = s; m[10] = c; return m; };
+  const RZ = (a) => { const c = Math.cos(a), s = Math.sin(a), m = I(); m[0] = c; m[1] = s; m[4] = -s; m[5] = c; return m; };
+  const chain = (...ms) => ms.reduce(mul);
+  const persp = (fovy, asp, n, f) => { const t = 1 / Math.tan(fovy / 2), m = new Float32Array(16);
+    m[0] = t / asp; m[5] = t; m[10] = (f + n) / (n - f); m[11] = -1; m[14] = 2 * f * n / (n - f); return m; };
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const norm = (a) => { const l = Math.hypot(...a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+  const lookAt = (e, c, u) => { const z = norm(sub(e, c)), x = norm(cross(u, z)), y = cross(z, x);
+    return new Float32Array([x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1]); };
+  // inverse-transpose of upper 3x3 (cofactor matrix; shader renormalises)
+  const nmat = (m) => { const a00 = m[0], a01 = m[4], a02 = m[8], a10 = m[1], a11 = m[5], a12 = m[9], a20 = m[2], a21 = m[6], a22 = m[10];
+    const C = [a11 * a22 - a12 * a21, -(a10 * a22 - a12 * a20), a10 * a21 - a11 * a20,
+               -(a01 * a22 - a02 * a21), a00 * a22 - a02 * a20, -(a00 * a21 - a01 * a20),
+               a01 * a12 - a02 * a11, -(a00 * a12 - a02 * a10), a00 * a11 - a01 * a10];
+    return new Float32Array([C[0], C[3], C[6], C[1], C[4], C[7], C[2], C[5], C[8]]); };
+
+  // ---- geometry
+  function sphere(lat = 28, lon = 40) { const p = [], i = [];
+    for (let a = 0; a <= lat; a++) { const th = a * Math.PI / lat;
+      for (let b = 0; b <= lon; b++) { const ph = b * 2 * Math.PI / lon; p.push(Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)); } }
+    for (let a = 0; a < lat; a++) for (let b = 0; b < lon; b++) { const q = a * (lon + 1) + b, r = q + lon + 1; i.push(q, r, q + 1, r, r + 1, q + 1); }
+    return { p, n: p.slice(), i }; }
+  function box() { const p = [], n = [], i = [];
+    const F = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    for (const f of F) { const u = f[1] ? [1, 0, 0] : [0, 1, 0], v = cross(f, u), base = p.length / 3;
+      for (const [s, t] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { for (let k = 0; k < 3; k++) { p.push((f[k] + u[k] * s + v[k] * t) * 0.5); n.push(f[k]); } }
+      i.push(base, base + 1, base + 2, base, base + 2, base + 3); }
+    return { p, n, i }; }
+  function cylinder(seg = 32) { const p = [], n = [], i = [];
+    for (let s = 0; s <= seg; s++) { const a = s / seg * 2 * Math.PI, c = Math.cos(a), si = Math.sin(a);
+      p.push(c, -0.5, si, c, 0.5, si); n.push(c, 0, si, c, 0, si); }
+    for (let s = 0; s < seg; s++) { const q = s * 2; i.push(q, q + 1, q + 2, q + 1, q + 3, q + 2); }
+    for (const y of [-0.5, 0.5]) { const ctr = p.length / 3; p.push(0, y, 0); n.push(0, Math.sign(y), 0);
+      for (let s = 0; s <= seg; s++) { const a = s / seg * 2 * Math.PI; p.push(Math.cos(a), y, Math.sin(a)); n.push(0, Math.sign(y), 0); }
+      for (let s = 0; s < seg; s++) i.push(ctr, ctr + 1 + s, ctr + 2 + s); }
+    return { p, n, i }; }
+  function cone(seg = 8, a0 = 0, a1 = 2 * Math.PI) { const p = [], n = [], i = [];
+    for (let s = 0; s < seg; s++) {
+      const u0 = a0 + s / seg * (a1 - a0), u1 = a0 + (s + 1) / seg * (a1 - a0), um = (u0 + u1) / 2, q = p.length / 3;
+      p.push(0, 0.5, 0, Math.cos(u0), -0.5, Math.sin(u0), Math.cos(u1), -0.5, Math.sin(u1));
+      const nm = [Math.cos(um) * 0.707, 0.707, Math.sin(um) * 0.707];
+      n.push(...nm, Math.cos(u0) * 0.707, 0.707, Math.sin(u0) * 0.707, Math.cos(u1) * 0.707, 0.707, Math.sin(u1) * 0.707);
+      i.push(q, q + 2, q + 1);
+      const b = p.length / 3;   // underside
+      p.push(0, -0.45, 0, Math.cos(u0), -0.5, Math.sin(u0), Math.cos(u1), -0.5, Math.sin(u1));
+      n.push(0, -1, 0, 0, -1, 0, 0, -1, 0);
+      i.push(b, b + 1, b + 2);
+    }
+    return { p, n, i }; }
+  // a palm frond: the same arch as palmGeom's spine (x = u(1 - 0.15u), y = rise*u - droop*u^2), leaflets from a bare
+  // stalk (the first 25%) to the tip, each a long flat tapered blade pointing sideways and forward, drooping in a V.
+  // Colour runs deep green at the stalk -> fresh green -> gold-green at the tips (leaflet tips a touch lighter).
+  // shapes: rise, droop, old. 0-1 the lower, arching tier; 2 young fronds reaching up; 3 an old frond hanging down
+  const FROND_SHAPES = [[0.48, 0.92, 0], [0.62, 1.1, 0], [1.2, 0.9, 0], [-0.1, 0.9, 1]];
+  const FROND_COLS = [[0.10, 0.38, 0.14], [0.30, 0.64, 0.16], [0.80, 0.88, 0.26]];   // stalk, middle, tips (sRGB)
+  const OLD_COLS = [[0.45, 0.36, 0.18], [0.62, 0.50, 0.26], [0.74, 0.62, 0.36]];
+  function frondGeom(rise, droop, old) { const p = [], n = [], c = [], i = [];
+    const at = (u) => [u * (1 - 0.15 * u), rise * u - droop * u * u, 0];
+    const pal = old ? OLD_COLS : FROND_COLS;
+    const col = (t) => { const a = t < 0.5 ? pal[0] : pal[1], b = t < 0.5 ? pal[1] : pal[2], k = t < 0.5 ? t * 2 : t * 2 - 1;
+      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]; };
+    // DECISION: fewer, broader leaflets with gaps between them, each folded along its middle (two flat halves that
+    //   catch the light differently), on a visible midrib. why -> 42 hair-thin leaflets a side blurred into a hazy
+    //   green curtain with a fringe at full window size; a toy-like frond reads clearly at any size.
+    const nrm = (v) => { const l = Math.hypot(...v) || 1; return v.map((x) => x / l); };
+    const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const tri = (A, B, C, ca, cb, cc) => {   // one flat triangle, its normal facing up (the shader lights both sides)
+      let nn = nrm(crs([B[0] - A[0], B[1] - A[1], B[2] - A[2]], [C[0] - A[0], C[1] - A[1], C[2] - A[2]]));
+      if (nn[1] < 0) nn = nn.map((x) => -x);
+      const q = p.length / 3;
+      p.push(...A, ...B, ...C); n.push(...nn, ...nn, ...nn); c.push(...ca, ...cb, ...cc); i.push(q, q + 1, q + 2);
+    };
+    const dim = (k, f) => [k[0] * f, k[1] * f, k[2] * f];
+    // the midrib: a narrow ribbon along the spine (the bare stalk before u = 0.25 is drawn as a cylinder)
+    const RIB = 14;
+    for (let k = 0; k < RIB; k++) {
+      const u0 = 0.25 + 0.73 * k / RIB, u1 = 0.25 + 0.73 * (k + 1) / RIB, a0 = at(u0), a1 = at(u1);
+      const w0 = 0.011 * (1 - 0.7 * (u0 - 0.25) / 0.75), w1 = 0.011 * (1 - 0.7 * (u1 - 0.25) / 0.75);
+      const rc = dim(pal[0], 0.9);
+      tri([a0[0], a0[1], -w0], [a1[0], a1[1], -w1], [a1[0], a1[1], w1], rc, rc, rc);
+      tri([a0[0], a0[1], -w0], [a1[0], a1[1], w1], [a0[0], a0[1], w0], rc, rc, rc);
+    }
+    const M = 17;
+    for (let k = 0; k < M; k++) {
+      const u = 0.27 + 0.7 * k / (M - 1), S = at(u), S2 = at(u + 0.01);
+      const dd = [S2[0] - S[0], S2[1] - S[1]], dl0 = Math.hypot(dd[0], dd[1]), T = [dd[0] / dl0, dd[1] / dl0, 0];
+      const len = 0.38 * Math.pow(Math.sin(Math.PI * (0.05 + 0.92 * (u - 0.25) / 0.75)), 0.6) + 0.04;
+      const t = (u - 0.25) / 0.75, cb = col(t * 0.8), cm = col(Math.min(1, t * 0.8 + 0.1)), ct = col(Math.min(1, t * 0.8 + 0.25));
+      for (const sd of [-1, 1]) {
+        const d = nrm([T[0] * 0.45, T[1] * 0.45 - (old ? 0.95 : 0.22), sd]);   // sideways and forward, drooping
+        const wd = nrm([T[0] - d[0] * (T[0] * d[0] + T[1] * d[1]), T[1] - d[1] * (T[0] * d[0] + T[1] * d[1]), -d[2] * (T[0] * d[0] + T[1] * d[1])]);
+        const up = nrm(crs(wd, d)), fold = up[1] < 0 ? -1 : 1;   // the leaflet's own "up", for the fold
+        const sag = (old ? 0.16 : 0.08) * len, w = (0.034 - 0.012 * t) * (old ? 0.8 : 1);
+        const pt = (along, side, lift) => [S[0] + d[0] * len * along + wd[0] * side + up[0] * lift * fold,
+                                           S[1] + d[1] * len * along + wd[1] * side + up[1] * lift * fold - sag * along * along,
+                                           S[2] + d[2] * len * along + wd[2] * side + up[2] * lift * fold];
+        const B = pt(0, 0, 0), L = pt(0.38, -w, -0.004), R = pt(0.38, w, -0.004), C = pt(0.42, 0, 0.012), P = pt(1, 0, 0);
+        const cl = dim(cm, 0.92);   // one half a shade darker: the fold shows even in flat light
+        tri(B, L, C, cb, cl, cl); tri(L, P, C, cl, dim(ct, 0.92), cl);
+        tri(B, C, R, cb, cm, cm); tri(C, P, R, cm, ct, cm);
+      }
+    }
+    return { p, n, c, i }; }
+  // a shark's dorsal fin: a curved leading edge sweeping back to the tip, a concave trailing edge, thicker at the root
+  function finGeom() { const p = [], n = [], i = [];
+    const bez = (a, c, b, u) => [(1 - u) ** 2 * a[0] + 2 * (1 - u) * u * c[0] + u * u * b[0], (1 - u) ** 2 * a[1] + 2 * (1 - u) * u * c[1] + u * u * b[1]];
+    const outline = [];
+    for (let k = 0; k <= 10; k++) outline.push(bez([0.24, 0], [0.12, 0.34], [-0.14, 0.42], k / 10));     // leading edge
+    for (let k = 1; k <= 8; k++) outline.push(bez([-0.14, 0.42], [-0.06, 0.12], [-0.2, 0], k / 8));     // trailing edge
+    // one closed shape: both sides share the outline (a sharp edge, z = 0) and bulge out at a ridge inside it, so it
+    // never shows as two separate surfaces
+    const ridge = outline.map(([x, y]) => [x * 0.55 + 0.01, y * 0.55 + 0.02]);
+    for (const side of [1, -1]) {
+      const o = p.length / 3;
+      for (const [x, y] of outline) { p.push(x, y, 0); n.push(0, 0.15, side); }
+      const r0 = p.length / 3;
+      for (const [x, y] of ridge) { const th = 0.04 * (1 - y / 0.45); p.push(x, y, th * side); n.push(0, 0.1, side); }
+      const c = p.length / 3;
+      p.push(0.02, 0.05, 0.045 * side); n.push(0, 0, side);
+      const m = outline.length;
+      for (let k = 0; k < m; k++) {
+        const k2 = (k + 1) % m;
+        i.push(o + k, o + k2, r0 + k2, o + k, r0 + k2, r0 + k);   // edge to ridge
+        i.push(r0 + k, r0 + k2, c);                               // ridge to the thickest point
+      }
+    }
+    return { p, n, i }; }
+  function torus(R = 1, r = 0.06, seg = 64, tube = 12, a0 = 0, a1 = 2 * Math.PI) { const p = [], n = [], i = [];
+    for (let s = 0; s <= seg; s++) { const u = a0 + s / seg * (a1 - a0);
+      for (let t = 0; t <= tube; t++) { const v = t / tube * 2 * Math.PI, cx = Math.cos(u), cz = Math.sin(u);
+        n.push(Math.cos(v) * cx, Math.sin(v), Math.cos(v) * cz);
+        p.push((R + r * Math.cos(v)) * cx, r * Math.sin(v), (R + r * Math.cos(v)) * cz); } }
+    for (let s = 0; s < seg; s++) for (let t = 0; t < tube; t++) { const q = s * (tube + 1) + t, w = q + tube + 1; i.push(q, w, q + 1, w, w + 1, q + 1); }
+    return { p, n, i }; }
+
+  // ---- shaders
+  const VS = `#version 300 es
+  in vec3 aPos; in vec3 aNrm; in vec3 aCol; uniform mat4 uModel, uVP; uniform mat3 uNrm;
+  out vec3 vN; out vec3 vW; out vec3 vO; out vec3 vC;
+  void main(){ vec4 w = uModel * vec4(aPos, 1.0); vW = w.xyz; vN = uNrm * aNrm; vO = aPos; vC = aCol; gl_Position = uVP * w; }`;
+  // DECISION: light in linear space with ACES tone mapping; colors are given in sRGB.
+  //   rejected -> lighting raw sRGB values (the first version).
+  //   why      -> raw sRGB lighting looks flat and washed out; this gives soft, saturated toy plastic.
+  // uMode: 0 lit surface, 1 soft contact shadow (disc), 2 glow halo (sphere), always premultiplied out.
+  const FS = `#version 300 es
+  precision highp float;
+  in vec3 vN; in vec3 vW; in vec3 vO; in vec3 vC;
+  uniform vec3 uColor, uColor2, uEmit, uCam, uRim, uSpotColor; uniform float uGloss, uAlpha, uMirror; uniform int uTwo, uVCol;
+  uniform int uMode, uSpots; uniform vec3 uSpot[6]; uniform float uSpotCos;
+  out vec4 o;
+  vec3 lin(vec3 c){ return pow(c, vec3(2.2)); }
+  vec3 aces(vec3 x){ return clamp(x * (2.51 * x + 0.03) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }
+  vec3 sky(float y){ return mix(vec3(0.10, 0.09, 0.12), vec3(0.42, 0.52, 0.78), smoothstep(-0.4, 0.9, y)); }
+  void main(){
+    vec3 v = normalize(uCam - vW);
+    // the mesh normals are authoritative (sphere winding is inverted, so gl_FrontFacing lies);
+    // only flip clearly back-facing normals, i.e. the far side of thin wings
+    vec3 n = normalize(vN); if (dot(n, v) < -0.2) n = -n;
+    if (uMode == 1) { float a = (1.0 - smoothstep(0.15, 1.0, length(vO.xz))) * uAlpha; o = vec4(0.0, 0.0, 0.0, a); return; }
+    if (uMode == 2) { float a = pow(max(dot(n, v), 0.0), 2.5) * uAlpha; o = vec4(lin(uEmit) * a, a * 0.35); return; }
+    // uTwo: the back face (normal away from the viewer) gets uColor2, e.g. a cape's lining
+    vec3 base = uTwo == 1 && dot(normalize(vN), v) < 0.0 ? lin(uColor2) : lin(uColor);
+    // uVCol: the mesh carries its own colours (e.g. a frond's green-to-gold), tinted by uColor; undersides a bit paler
+    if (uVCol == 1) base = lin(vC) * lin(uColor) * (dot(normalize(vN), v) < 0.0 ? 1.18 : 1.0);
+    if (uSpots > 0) {  // flat painted spots on the unit-sphere shell (mirrored per half)
+      vec3 p = normalize(vO); p.x *= uMirror; float s = 0.0;
+      for (int i = 0; i < 6; i++) { if (i >= uSpots) break; s = max(s, smoothstep(uSpotCos - 0.012, uSpotCos + 0.004, dot(p, uSpot[i]))); }
+      base = mix(base, lin(uSpotColor), s);
+    }
+    vec3 L1 = normalize(vec3(0.55, 1.0, 0.75)), L2 = normalize(vec3(-0.9, 0.3, 0.4));
+    float w1 = max((dot(n, L1) + 0.35) / 1.35, 0.0), w2 = max((dot(n, L2) + 0.3) / 1.3, 0.0);
+    vec3 diff = base * (vec3(1.05, 0.97, 0.9) * w1 * 1.25 + vec3(0.45, 0.55, 0.9) * w2 * 0.35 + sky(n.y) * 0.9);
+    float nv = max(dot(n, v), 0.0), fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+    float spec = pow(max(dot(n, normalize(L1 + v)), 0.0), mix(12.0, 220.0, uGloss)) * uGloss * 1.6;
+    vec3 env = sky(reflect(-v, n).y) * fres * uGloss * 1.2;
+    vec3 rim = lin(uRim) * pow(1.0 - nv, 3.0) * 0.55;
+    vec3 c = diff + spec * vec3(1.0, 0.97, 0.92) + env + rim + lin(uEmit) * 1.6;
+    c = pow(aces(c * 1.1), vec3(1.0 / 2.2));
+    o = vec4(c * uAlpha, uAlpha);
+  }`;
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.bindAttribLocation(prog, 0, "aPos"); gl.bindAttribLocation(prog, 1, "aNrm"); gl.bindAttribLocation(prog, 2, "aCol");
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const U = {}; for (const k of ["uModel", "uVP", "uNrm", "uColor", "uEmit", "uCam", "uGloss", "uRim", "uSpotColor", "uAlpha",
+    "uMirror", "uMode", "uSpots", "uSpot", "uSpotCos", "uColor2", "uTwo", "uVCol"]) U[k] = gl.getUniformLocation(prog, k);
+
+  const upload = (g) => { const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = (data, loc) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0); };
+    buf(g.p, 0); buf(g.n, 1);
+    if (g.c) buf(g.c, 2);   // per-vertex colour (only some meshes)
+    const e = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, e); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(g.i), gl.STATIC_DRAW);
+    gl.bindVertexArray(null); return { vao, count: g.i.length, vcol: !!g.c }; };
+  const MESH = { sphere: upload(sphere()), box: upload(box()), cyl: upload(cylinder()), ring: upload(torus()),
+                 smile: upload(torus(1, 0.16, 24, 10, Math.PI * 0.18, Math.PI * 0.82)),
+                 halfRing: upload(torus(1, 0.3, 24, 8, -Math.PI / 2, Math.PI / 2)),
+                 wedge: upload(cone(4, 0, Math.PI / 4)),   // one eighth of a parasol canopy
+                 fronds: FROND_SHAPES.map(([r, d, o]) => upload(frondGeom(r, d, o))),   // one mesh per frond shape
+                 fin: upload(finGeom()) };
+
+  const hex = (h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16) / 255);
+  const DARK = hex("#0f1424"), GROUND = hex("#1a2133"), CRATE = hex("#c98c4a"), PAPER = hex("#f4f1e8");
+  const RED = hex("#f2271c"), SPOT = hex("#1d1f27"), BELLY = hex("#fff0d6"), HEAD = hex("#2a2e3a"), LIMB = hex("#2f3340"),
+        EYE = hex("#ffffff"), CHEEK = hex("#ff9aa8"), WING = hex("#d6e6ff");
+  const BLACK = [0, 0, 0];
+  const scaleV = (v, k) => [v[0] * k, v[1] * k, v[2] * k];
+
+  let VP, CAM = [0, 1.0, 8.6], CAM_AT = [0, 0.3, 0], rimNow = [0, 0, 0];
+  // opts: { alpha, mode, spots: {dirs, mirror} }. Opaque parts draw now; shadows, glows and
+  // translucent parts queue and draw last without depth writes so they blend over everything.
+  const later = [];
+  function draw(mesh, model, color, emit = BLACK, gloss = 0.35, opts = {}) {
+    if (((opts.alpha ?? 1) < 1 || opts.mode === 1 || opts.mode === 2) && !opts.flush) { later.push([mesh, model, color, emit, gloss, { ...opts, flush: true }]); return; }
+    gl.uniformMatrix4fv(U.uModel, false, model); gl.uniformMatrix3fv(U.uNrm, false, nmat(model));
+    gl.uniform3fv(U.uColor, color); gl.uniform3fv(U.uEmit, emit); gl.uniform1f(U.uGloss, gloss);
+    gl.uniform1i(U.uTwo, opts.color2 ? 1 : 0); if (opts.color2) gl.uniform3fv(U.uColor2, opts.color2);
+    gl.uniform1i(U.uVCol, mesh.vcol ? 1 : 0);
+    gl.uniform1f(U.uAlpha, opts.alpha ?? 1); gl.uniform1i(U.uMode, opts.mode || 0);
+    const sp = opts.spots;
+    gl.uniform1i(U.uSpots, sp ? sp.dirs.length : 0);
+    if (sp) { gl.uniform3fv(U.uSpot, sp.dirs.flat()); gl.uniform1f(U.uMirror, sp.mirror); }
+    if (opts.rim) gl.uniform3fv(U.uRim, opts.rim);
+    gl.bindVertexArray(mesh.vao); gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0);
+    if (opts.rim) gl.uniform3fv(U.uRim, rimNow);
+  }
+  function flushLater() {
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+    for (const a of later) draw(...a);
+    later.length = 0;
+    gl.depthMask(true); gl.disable(gl.BLEND);
+  }
+
+  const SAND = hex("#f3d9a4"), SEA = hex("#2fa7d8"), FOAM = hex("#ffffff"),
+        SUN = hex("#ffd34d"), WOOD = hex("#c8894f"), STRIPE_A = hex("#ffffff"), STRIPE_B = hex("#22b5c9"),
+        SHADES = hex("#14161c"), GLASS = hex("#e8f6ff"), DRINK = hex("#ff7a3d"), LIME = hex("#9be15d"),
+        PARASOL = hex("#ff5d8f"), TRUNK = hex("#94785a"), PALM = hex("#2f9e57"),
+        TRUNK_D = hex("#6f5940"), PALM_D = hex("#237a43"), COCO = hex("#6b4a2b"),
+        PALM_Y = hex("#6fae3a"), FROND_OLD = hex("#a4844a"), COCO_G = hex("#7a8f2e"), WET_SAND = hex("#d8b77c"),
+        SHALLOW = hex("#5fd6df"), DEEP = hex("#1f86c2"), SHELL = hex("#f6c9b8"), PEBBLE = hex("#9a948a"),
+        STAR = hex("#f08a4b"), GRASS = hex("#7fa84a"), ISLET = hex("#3f8f88"), SHARK_C = hex("#3f4a55"), SKYTINT = hex("#bfe3ff");
+
+  const lerp = (a, b, k) => a + (b - a) * k;
+  const lerpV = (a, b, k) => a.map((v, i) => lerp(v, b[i], k));
+  const smooth = (a, b, x) => { const u = Math.min(1, Math.max(0, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+
+  // ---- posing helpers: world-space limbs from two-bone IK, so hands land exactly on what they hold
+  const xf = (m, p) => [m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+                        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]];
+  const xd = (m, d) => [m[0] * d[0] + m[4] * d[1] + m[8] * d[2], m[1] * d[0] + m[5] * d[1] + m[9] * d[2], m[2] * d[0] + m[6] * d[1] + m[10] * d[2]];
+  const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  const sc = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+  const len = (a) => Math.hypot(a[0], a[1], a[2]);
+  // the unit cylinder (radius 1, y in [-0.5, 0.5]) stretched onto the segment a -> b
+  function segM(a, b, r) {
+    const d = sub(b, a), L = len(d) || 1e-6, y = sc(d, 1 / L);
+    const x = norm(cross(y, Math.abs(y[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])), z = cross(x, y), m = add(a, sc(d, 0.5));
+    return new Float32Array([x[0] * r, x[1] * r, x[2] * r, 0, d[0], d[1], d[2], 0, z[0] * r, z[1] * r, z[2] * r, 0, m[0], m[1], m[2], 1]);
+  }
+  // two-bone IK: joint for a limb from s toward t (clamped to reach), bending toward the pole direction
+  function ik(s, t, la, lb, pole) {
+    let d = sub(t, s), L = len(d) || 1e-6;
+    const maxL = (la + lb) * 0.999;
+    if (L > maxL) { d = sc(d, maxL / L); L = maxL; }
+    const dir = sc(d, 1 / L), along = (la * la - lb * lb + L * L) / (2 * L);
+    const h = Math.sqrt(Math.max(la * la - along * along, 0));
+    const p = norm(sub(pole, sc(dir, dot(pole, dir))));
+    return { j: add(add(s, sc(dir, along)), sc(p, h)), e: add(s, d) };
+  }
+  function limb(s, t, la, lb, pole, r, color) {
+    const { j, e } = ik(s, t, la, lb, pole);
+    draw(MESH.cyl, segM(s, j, r), color, BLACK, 0.4);
+    draw(MESH.sphere, chain(T(...j), S(r * 1.1)), color, BLACK, 0.4);
+    draw(MESH.cyl, segM(j, e, r * 0.9), color, BLACK, 0.4);
+    return e;
+  }
+  const at = (B, p) => { const m = new Float32Array(B); m[12] = p[0]; m[13] = p[1]; m[14] = p[2]; return m; };  // B's rotation, placed at p
+
+  // ---- the bug (body-local: faces +z, y up, sx = +1 is its left / screen right)
+  const HIP_H = 1.12;                       // body origin height above the ground when standing (body units)
+  // DECISION: at work the hero is about half size, so the roof and the city are big around it and a flight
+  //   over them reads as a flight. The beach keeps full size (the sunbed is sized to it).
+  const HS = 0.55;
+  const HALF = [0.5, 0.92, 0.66], HALF_C = [0.28, 0.2, -0.12], HINGE = [0.1, 0.92, -0.15];
+  // half-local unit-sphere directions; x >= 0.45 keeps them clear of the belly, z > 0 faces the camera
+  // spread over the whole half (front, side and back), not bunched at the front
+  const SPOTS = [[0.42, 0.66, 0.62], [0.45, -0.05, 0.9], [0.42, -0.76, 0.5], [0.94, 0.28, 0.2], [0.82, -0.42, -0.38],
+                 [0.45, 0.4, -0.8]].map(norm);
+  const SPOTS_BY_SIDE = { 1: SPOTS, [-1]: SPOTS.map(([x, y, z]) => [-x, y, z]) };
+  const SHOULDER = (sx) => [sx * 0.36, 0.45, 0.36], SHOULDER2 = (sx) => [sx * 0.4, 0.02, 0.34], HIP = (sx) => [sx * 0.18, -0.55, 0.05];
+
+  const MOUTH = [0, -0.13, 0.56];          // head-local: just in front of the smile
+
+  // what the hands hold, body-local; hands are aimed at the edges of these
+  const CRATE_AT = [0, 0.24, 0.84], CRATE_HALF = [0.25, 0.18, 0.18];
+  // the page is held up just below the eyes, tilted back toward the face, printed side toward the bug;
+  // its top edge stays under the eyes so the viewer still sees them reading
+  const PAPER_AT = [0, 0.85, 0.78], PAPER_HALF = [0.25, 0.31], PAPER_TILT = 0.5;
+
+  // hand targets per state: { up, low } for the upper and lower arm of side sx. The hero's resting pose is
+  // the power stance: all four hands on the hips.
+  function handTargets(st, t, sx) {
+    const hips = { up: [sx * 0.52, 0.0, 0.18], low: [sx * 0.5, -0.32, 0.12] };
+    switch (st) {
+      case "thinking": return sx === 1 ? { up: [0.1, 0.84, 0.6], low: [0.3, -0.12, 0.5] }        // hand on chin
+                                       : { up: [0.12, 0.02, 0.62], low: [-0.3, -0.12, 0.5] };     // arm across, under the badge
+      case "reading":  return { up: [sx * (PAPER_HALF[0] + 0.04), PAPER_AT[1] - 0.05, PAPER_AT[2] - 0.02], low: hips.low };
+      case "moving":   return { up: [sx * (CRATE_HALF[0] + 0.06), CRATE_AT[1] + 0.02, CRATE_AT[2]],
+                                low: [sx * 0.13, CRATE_AT[1] - CRATE_HALF[1] - 0.06, CRATE_AT[2]] };  // one pair grips the sides, one carries the bottom
+      case "waiting":  return sx === 1 ? { up: [0.62, 1.25, 0.4 + Math.sin(t * 7) * 0.12], low: hips.low }   // signalling you
+                                       : hips;
+      case "denied":   return { up: [-sx * 0.22, 0.78, 0.82], low: [sx * 0.3, -0.15, 0.5] };   // forearms crossed in front: blocked
+      case "done":     return sx === 1 ? { up: [0.78, 0.98, 0.36], low: hips.low } : hips;     // fist raised beside the head
+      case "stuck":    return { up: [sx * 0.42, -0.3, 0.42], low: [sx * 0.38, -0.5, 0.3] };   // on one knee, hands down
+      default:         return hips;
+    }
+  }
+
+  // ---- "alive" layer: blinking, gaze, breathing and antenna physics.
+  // DECISION: small irregular motions driven by timers, smooth noise and a spring, not more sine waves.
+  //   rejected -> periodic sin() for every motion (the first version).
+  //   why      -> anything that repeats on a fixed beat reads as a machine; living things blink at random,
+  //               look at things with quick saccades, and their loose parts lag behind the body.
+  const nz = (t, s) => Math.sin(t * 0.71 + s * 1.7) * 0.5 + Math.sin(t * 1.33 + s * 4.1) * 0.3 + Math.sin(t * 2.17 + s * 2.9) * 0.2;
+  // the shortest signed angle; must hold for any d (% in JS keeps the sign, so the old ((d + 3π) % 2π) - π
+  // turned the long way once the heading had grown by a few laps, and the bug spun on its turns)
+  const wrapA = (d) => d - Math.PI * 2 * Math.floor((d + Math.PI) / (Math.PI * 2));
+  const clampN = (x, m) => Math.max(-m, Math.min(m, x));
+  const life = { blinkAt: 1.5, gaze: [0, 0], gazeTo: [0, 0], gazeAt: 0, phys: null,
+                 ant: { 1: { s: 0, vs: 0, f: 0, vf: 0 }, [-1]: { s: 0, vs: 0, f: 0, vf: 0 } } };
+  let frameDt = 0;
+  // 1 = open. Fast close, slower open; every few seconds at random, sometimes a double blink.
+  function blinkAmount(t) {
+    const d = t - life.blinkAt;
+    if (d > 0.2) { life.blinkAt = t + (Math.random() < 0.15 ? 0.12 : 2 + Math.random() * 4.5); return 1; }
+    if (d < 0) return 1;
+    return 0.08 + 0.92 * (d < 0.07 ? 1 - d / 0.07 : (d - 0.07) / 0.13);
+  }
+  // pupil direction in [-1, 1]: x right, y up. Reading scans lines; idle glances around and back at you.
+  function updateGaze(t, st, dt) {
+    let target;
+    if (st === "reading") { const p = (t * 0.42) % 1; target = [p < 0.82 ? -0.6 + 1.2 * p / 0.82 : 0.6 - 1.2 * (p - 0.82) / 0.18, -0.6]; }
+    else if (st === "thinking") target = [0.5 + nz(t, 3) * 0.12, 0.65];
+    else if (st === "waiting" || st === "denied" || st === "stuck") target = [0, st === "stuck" ? -0.5 : 0];
+    else {
+      if (t > life.gazeAt) {
+        life.gazeTo = Math.random() < 0.4 ? [0, 0] : [(Math.random() * 2 - 1) * 0.7, (Math.random() * 2 - 1) * 0.45];
+        life.gazeAt = t + 0.8 + Math.random() * 2.4;
+      }
+      target = life.gazeTo;
+    }
+    life.gaze = lerpV(life.gaze, target, 1 - Math.exp(-dt * 16));  // quick saccades
+  }
+  // antenna tips lag behind the head's acceleration on an underdamped spring, so they bob and settle
+  function updateAntennae(H) {
+    const p = xf(H, [0, 0.45, 0]), dt = frameDt, ph = life.phys;
+    if (!ph || dt <= 0 || len(sub(p, ph.p)) > 0.5) { life.phys = { p, v: [0, 0, 0] }; return; }  // first frame or a jump
+    const v = sc(sub(p, ph.p), 1 / dt);
+    let a = sc(sub(v, ph.v), 1 / dt);
+    const al = len(a); if (al > 40) a = sc(a, 40 / al);
+    life.phys = { p, v };
+    const ar = dot(a, norm(xd(H, [1, 0, 0]))), af = dot(a, norm(xd(H, [0, 0, 1]))), au = dot(a, norm(xd(H, [0, 1, 0])));
+    for (const sx of [-1, 1]) {
+      const s = life.ant[sx], K = 90, C = 8, g = 0.045 * reduce;
+      const ds = clampN(ar * g - sx * au * g * 0.5, 0.5), df = clampN(-af * g, 0.5);
+      s.vs += (K * (ds - s.s) - C * s.vs) * dt; s.s += s.vs * dt;
+      s.vf += (K * (df - s.f) - C * s.vf) * dt; s.f += s.vf * dt;
+    }
+  }
+
+  // ---- the hero costume: a cape that flows with the motion, a domino mask, a chest badge, a belt, gloves, boots.
+  // the Zorro look: a wide black fabric mask over the eyes, a red cape (red on both sides, at every angle)
+  const CAPE_C = hex("#9a1a2b"), LINING = hex("#a81f31"), GOLD = hex("#f2b632"), MASK_C = hex("#0c0c10"),
+        FIRE_Y = hex("#ffd23f"), FIRE_O = hex("#ff8a1f"), FIRE_R = hex("#ff4a1c"), INK = hex("#111318");
+  // DECISION: the cape is simulated cloth (Verlet particles + distance constraints), tied around the neck.
+  //   rejected -> a shape computed from the body's velocity (the first version).
+  //   why      -> that cape sat glued to the back and moved stiffly; cloth lags, swings, drapes over the shell,
+  //               streams behind in flight and flares out in a spin, with no special cases.
+  // a short cape (collar to just past the hips): smaller, so it reads as cloth flying off the back, not a cover
+  const CAPE_NU = 6, CAPE_NV = 10, CAPE_LEN = 1.5;
+  const CAPE = (() => {
+    const nu = CAPE_NU, nv = CAPE_NV, n = (nu + 1) * (nv + 1), vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const mk = (loc) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, n * 12, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0); return b; };
+    const pb = mk(0), nb = mk(1), idx = [];
+    for (let a = 0; a < nv; a++) for (let b = 0; b < nu; b++) { const q = a * (nu + 1) + b, r = q + nu + 1; idx.push(q, r, q + 1, r, r + 1, q + 1); }
+    const e = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, e); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    return { vao, count: idx.length, pb, nb, P: new Float32Array(n * 3), N: new Float32Array(n * 3) };
+  })();
+  // DECISION: the mask is shaped fabric on the head, not a plain band. why -> the band read as sunglasses; the
+  //   brow line, the outer corners sweeping up to the temples and the notch over the nose make it Zorro's.
+  //   The eyes are drawn into it as slanted almonds (cutting holes in the mesh gave jagged, misplaced edges).
+  // Head-local (head ellipsoid 0.62 x 0.56 x 0.56), eyes at their default height; theta = 0 is the front.
+  function maskGeom(nu = 96, nv = 12) {
+    const front = (a) => smooth(1.7, 0.9, a);
+    const top = (a) => lerp(0.3, 0.46, front(a)) + 0.08 * front(a) * smooth(0.2, 0.8, a);              // corners rise
+    const bot = (a) => lerp(0.02, -0.17, front(a)) + 0.14 * front(a) * (1 - smooth(0.04, 0.26, a));    // nose notch
+    const on = (th, ph) => { const k = 1.035; return [0.62 * k * Math.sin(th) * Math.cos(ph), 0.56 * k * Math.sin(ph), 0.56 * k * Math.cos(th) * Math.cos(ph)]; };
+    const p = [], n = [], i = [];
+    for (let a = 0; a <= nu; a++) {
+      const th = -Math.PI + a / nu * 2 * Math.PI, A = Math.abs(th);
+      for (let b = 0; b <= nv; b++) {
+        const ph = lerp(bot(A), top(A), b / nv), q = on(th, ph);
+        p.push(...q); n.push(...norm([q[0] / 0.384, q[1] / 0.314, q[2] / 0.314]));
+      }
+    }
+    for (let a = 0; a < nu; a++) for (let b = 0; b < nv; b++) { const q = a * (nv + 1) + b, r = q + nv + 1; i.push(q, r, q + 1, r, r + 1, q + 1); }
+    return { p, n, i };
+  }
+  const MASK_MESH = upload(maskGeom());
+  const cid = (a, b) => a * (CAPE_NU + 1) + b;
+  // the shell and the head as body-local ellipsoids the cloth stays out of: [center, radii] (the shell halves a
+  // little inflated, so the cape keeps a small gap and never sinks into the shell)
+  const CAPE_COLLIDE = [[[0.28, 0.2, -0.12], [0.55, 0.99, 0.72]], [[-0.28, 0.2, -0.12], [0.55, 0.99, 0.72]],
+                        [[0, 1.22, 0.08], [0.68, 0.62, 0.62]]];
+  // push a body-local point out of the ellipsoids, to the surface along the line from the center
+  function pushOut(l) {
+    let moved = false;
+    for (const [c, r] of CAPE_COLLIDE) {
+      const d = [l[0] - c[0], l[1] - c[1], l[2] - c[2]], e = (d[0] / r[0]) ** 2 + (d[1] / r[1]) ** 2 + (d[2] / r[2]) ** 2;
+      if (e >= 1) continue;
+      const f = 1 / Math.sqrt(e || 1e-6);
+      l[0] = c[0] + d[0] * f; l[1] = c[1] + d[1] * f; l[2] = c[2] + d[2] * f;
+      moved = true;
+    }
+    return moved;
+  }
+  // the collar (body-local): an arc across the top of the shell just behind the head, where the shell and the
+  // head meet. Placed, not pushed out: at y 0.95 a point is outside both the (inflated) shell and the head from
+  // z = -0.48 back (worked out from the ellipsoids), and below the face limit (y 1.0)
+  const COLLAR = Array.from({ length: CAPE_NU + 1 }, (_, b) => {
+    const u = b / CAPE_NU * 2 - 1;
+    return [0.45 * u, 0.95 - 0.03 * u * u, -0.5 - 0.07 * u * u];
+  });
+  const collar = (b) => COLLAR[b];
+  // the hanging shape (straight down from the collar, flaring a little toward the hem, outside the shell), used
+  // for the rest lengths and to (re)start the cloth
+  function capeRest(B, a, b) {
+    const c = collar(b), v = a / CAPE_NV, l = [c[0] * (1 + 0.3 * v), c[1] - CAPE_LEN * v, c[2] - 0.12 * v];
+    for (let k = 0; k < 4; k++) pushOut(l);
+    return xf(B, l);
+  }
+  const cloth = { p: null, q: null, links: null, ks: 0 };
+  function stepCape(B, dt, t) {
+    const n = (CAPE_NU + 1) * (CAPE_NV + 1), ks = len(xd(B, [1, 0, 0]));
+    if (!cloth.links) {   // rest lengths (body units) from the hanging shape: structure, shear and bend links
+      const R = [];
+      for (let a = 0; a <= CAPE_NV; a++) for (let b = 0; b <= CAPE_NU; b++) R.push(capeRest(I(), a, b));
+      cloth.links = [];
+      const link = (i, j) => cloth.links.push([i, j, len(sub(R[i], R[j]))]);
+      for (let a = 0; a <= CAPE_NV; a++) for (let b = 0; b <= CAPE_NU; b++) {
+        if (b < CAPE_NU) link(cid(a, b), cid(a, b + 1));
+        if (a < CAPE_NV) link(cid(a, b), cid(a + 1, b));
+        if (a < CAPE_NV && b < CAPE_NU) { link(cid(a, b), cid(a + 1, b + 1)); link(cid(a, b + 1), cid(a + 1, b)); }
+        if (a < CAPE_NV - 1) link(cid(a, b), cid(a + 2, b));
+      }
+      cloth.down = R.map((p, j) => (j > CAPE_NU ? len(sub(p, R[j - CAPE_NU - 1])) : 0));
+    }
+    // start hanging on the first frame, after a jump, or while the body changes size (growing a cloth in place
+    // folded it up over the head)
+    if (!cloth.p || len(sub(cloth.p[0], xf(B, collar(0)))) > 0.6 || Math.abs(ks - cloth.ks) > 0.01 * ks) {
+      cloth.p = []; for (let a = 0; a <= CAPE_NV; a++) for (let b = 0; b <= CAPE_NU; b++) cloth.p.push(capeRest(B, a, b));
+      cloth.q = cloth.p.map((v) => v.slice());
+      cloth.ks = ks; cloth.pins = null;
+    }
+    // fixed-size substeps (~1/120 s) and drag per second, so the cloth behaves the same at 60 or 240 frames/s
+    dt = Math.min(dt, 0.05);
+    // air drag: velocity keeps 8% per second, so in flight the cloth lags behind the moving collar and streams
+    const steps = Math.max(1, Math.ceil(dt * 120)), h = dt / steps, gy = -7 * ks * h * h, drag = Math.pow(0.08, h);
+    const wind = [Math.sin(t * 1.3) * 0.5 * ks * h * h, 0, Math.cos(t * 0.9) * 0.4 * ks * h * h];
+    // how fast the collar moves (body units per second), smoothed
+    const pc = xf(B, collar(CAPE_NU / 2)), pv = cloth.pc && dt > 0 ? sc(sub(pc, cloth.pc), 1 / dt) : [0, 0, 0];
+    cloth.pc = pc; cloth.spd = lerp(cloth.spd || 0, len(pv) / ks, 1 - Math.exp(-dt * 4));
+    const fast = smooth(0.4, 1.5, cloth.spd);
+    // a weak pull toward the hanging shape (about 3 per second) when slow, so a hard stop can't leave the cape
+    // draped over the head; it is off in flight, where the cape must stream free
+    const rest = [], pull = (1 - Math.exp(-3 * h)) * (1 - fast);
+    for (let a = 0; a <= CAPE_NV; a++) for (let b = 0; b <= CAPE_NU; b++) rest.push(capeRest(B, a, b));
+    // turbulence in flight: waves across the airflow that run down the cape toward the hem, stronger with speed
+    const dir = len(pv) > 1e-4 ? norm(pv) : [0, 0, 1], e1 = norm(Math.abs(dir[1]) < 0.95 ? cross(dir, [0, 1, 0]) : [1, 0, 0]), e2 = cross(e1, dir);
+    const flut = 35 * ks * fast * reduce * h * h;
+    // lift: the airflow over the body peels the cape off the back, more toward the hem (otherwise it lies flat on
+    // the shell and looks glued on)
+    const back = sc(norm(xd(B, [0, 0, -1])), 30 * ks * fast * h * h);
+    for (let s = 0; s < steps; s++) {
+      for (let i = CAPE_NU + 1; i < n; i++) {   // Verlet: keep the velocity (with air drag), add gravity and a breeze
+        const p = cloth.p[i], q = cloth.q[i];
+        cloth.q[i] = p;
+        cloth.p[i] = [p[0] + (p[0] - q[0]) * drag + wind[0], p[1] + (p[1] - q[1]) * drag + gy, p[2] + (p[2] - q[2]) * drag + wind[2]];
+        cloth.p[i] = lerpV(cloth.p[i], rest[i], pull);
+        if (flut > 0) {
+          const a = Math.floor(i / (CAPE_NU + 1)), b = i % (CAPE_NU + 1), v = a / CAPE_NV;
+          cloth.p[i] = add(cloth.p[i], sc(back, Math.min(1, v * 1.6)));
+          const w1 = Math.sin(t * 9 - a * 0.8 + b * 0.6) * v, w2 = Math.cos(t * 7 - a * 0.6 - b * 0.4) * v;
+          cloth.p[i] = add(cloth.p[i], add(sc(e1, w1 * flut), sc(e2, w2 * flut)));
+        }
+      }
+      for (let b = 0; b <= CAPE_NU; b++) {   // tied to the collar, moving smoothly from last frame's position
+        const c = xf(B, collar(b)), c0 = cloth.pins ? cloth.pins[b] : c;
+        cloth.q[b] = cloth.p[b]; cloth.p[b] = lerpV(c0, c, (s + 1) / steps);
+      }
+      for (let it = 0; it < 8; it++) {
+        for (const [i, j, r] of cloth.links) {
+          const pi = cloth.p[i], pj = cloth.p[j], d = sub(pj, pi), L = len(d) || 1e-6, k = (L - r * ks) / L;
+          const pinI = i <= CAPE_NU, pinJ = j <= CAPE_NU;
+          if (pinI && pinJ) continue;
+          const wi = pinI ? 0 : pinJ ? 1 : 0.5, wj = 1 - wi;
+          cloth.p[i] = add(pi, sc(d, k * wi)); cloth.p[j] = sub(pj, sc(d, k * wj));
+        }
+        for (let i = CAPE_NU + 1; i < n; i++) {
+          const l = toBody(B, cloth.p[i]);
+          let moved = pushOut(l);
+          // the cape stays behind the hero: never in front of the shoulders, never above the collar (whatever the
+          // air or a sudden turn does to it, it must not blow over the face)
+          if (l[2] > 0.12) { l[2] = 0.12; moved = true; }
+          if (l[1] > 1.0) { l[1] = 1.0; moved = true; }
+          if (moved) cloth.p[i] = xf(B, l);
+        }
+      }
+      // stretch limit (cloth, not rubber): no structural or shear link longer than 110% of its own rest length.
+      // Links run top to bottom, so fixing them in order carries the pinned collar's position down the cape.
+      for (let pass = 0; pass < 2; pass++) for (const [i, j, r] of cloth.links) {
+        if (j - i >= 2 * (CAPE_NU + 1)) continue;   // bend links (two rows apart) may flex
+        const pinI = i <= CAPE_NU, pinJ = j <= CAPE_NU;
+        if (pinI && pinJ) continue;
+        const d = sub(cloth.p[j], cloth.p[i]), L = len(d), max = 1.1 * r * ks;
+        if (L <= max) continue;
+        const k = (L - max) / L, wi = pinI ? 0 : pinJ ? 1 : 0.5;
+        cloth.p[i] = add(cloth.p[i], sc(d, k * wi)); cloth.p[j] = sub(cloth.p[j], sc(d, k * (1 - wi)));
+      }
+      // last, the down links top to bottom, moving only the lower end: each starts from an already-fixed point,
+      // so no column of the cape can hang longer than 110% (later links in the passes above pulled some out again)
+      for (let a = 0; a < CAPE_NV; a++) for (let b = 0; b <= CAPE_NU; b++) {
+        const i = cid(a, b), j = cid(a + 1, b), d = sub(cloth.p[j], cloth.p[i]), L = len(d), max = 1.1 * cloth.down[j] * ks;
+        if (L > max) cloth.p[j] = add(cloth.p[i], sc(d, max / L));
+      }
+    }
+    cloth.pins = Array.from({ length: CAPE_NU + 1 }, (_, b) => xf(B, collar(b)));
+  }
+  function drawCape(B, o) {
+    stepCape(B, frameDt, o.t);
+    cloth.B = B;   // the body frame of this step, for the ?debug=1 measurements
+    const { P, N } = CAPE, pts = cloth.p;
+    for (let a = 0; a <= CAPE_NV; a++) for (let b = 0; b <= CAPE_NU; b++) {
+      const i = cid(a, b);
+      const du = sub(pts[cid(a, Math.min(CAPE_NU, b + 1))], pts[cid(a, Math.max(0, b - 1))]);
+      const dv = sub(pts[cid(Math.min(CAPE_NV, a + 1), b)], pts[cid(Math.max(0, a - 1), b)]);
+      P.set(pts[i], i * 3); N.set(norm(cross(du, dv)), i * 3);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, CAPE.pb); gl.bufferSubData(gl.ARRAY_BUFFER, 0, P);
+    gl.bindBuffer(gl.ARRAY_BUFFER, CAPE.nb); gl.bufferSubData(gl.ARRAY_BUFFER, 0, N);
+    draw(CAPE, I(), CAPE_C, BLACK, 0.6, o.hero < 1 ? { alpha: o.hero, color2: LINING } : { color2: LINING });
+    const ks = len(xd(B, [1, 0, 0]));
+    for (let b = 0; b < CAPE_NU; b++) {   // the collar band: a rolled edge along the top of the cape
+      const p0 = xf(B, collar(b)), p1 = xf(B, collar(b + 1));
+      draw(MESH.cyl, segM(p0, p1, 0.05 * ks), CAPE_C, BLACK, 0.5);
+      draw(MESH.sphere, chain(T(...p1), S(0.05 * ks)), CAPE_C, BLACK, 0.5);
+    }
+    for (const b of [0, CAPE_NU]) draw(MESH.sphere, chain(B, T(...collar(b)), S(0.075)), GOLD, scaleV(GOLD, 0.2), 0.8);   // clasps
+  }
+
+  // o: { col, st, t, open, headYaw, headTilt, headPitch, hands, feet, crate, paper, shades, sad, pulse, droop, thinkDots,
+  //      blink, gaze, breath, hero (0..1 costume), shield (0..1), spd (body units per second) }
+  function drawBug(B, o) {
+    const { col, st, t } = o, out = {};
+    const ks = len(xd(B, [1, 0, 0]));   // the body's scale: limb radii and ribbons are in world units
+    const br = (o.breath || 0) * reduce;  // breathing: the shell rises and widens a little
+    draw(MESH.sphere, chain(B, T(0, 0.15, 0), S(0.6 * (1 + 0.012 * br), 0.85, 0.55 * (1 + 0.016 * br))), BELLY, BLACK, 0.25);
+    const hero = o.hero || 0, suit = hero > 0.5;
+    if (suit) {   // chest badge: a black B on a fire emblem with flickering flame tongues; a gold belt
+      // badge-local: x = right, -z = up, +y = out of the belly
+      const Bd = chain(B, T(0, 0.4, 0.52), RX(Math.PI / 2 - 0.22));
+      draw(MESH.cyl, chain(Bd, S(0.21, 0.03, 0.21)), FIRE_Y, scaleV(FIRE_Y, 0.45), 0.6);
+      for (let i = 0; i < 11; i++) {
+        const a = i / 11 * Math.PI * 2 + 0.3, up = Math.max(0, -Math.sin(a));   // longer tongues toward the top
+        const L = (0.06 + 0.08 * up) * (1 + 0.2 * Math.sin(t * 9 + i * 1.7) * reduce), c = i % 2 ? FIRE_O : FIRE_R;
+        draw(MESH.sphere, chain(Bd, RY(-a), T(0.2 + L * 0.45, -0.004, 0), S(L, 0.012, 0.035 + 0.012 * up)), c, scaleV(c, 0.7), 0.4);
+      }
+      const at2 = (x, up) => T(x, 0.03, -up);
+      draw(MESH.box, chain(Bd, at2(-0.06, 0), S(0.06, 0.04, 0.3)), INK, BLACK, 0.5);                      // stem
+      draw(MESH.halfRing, chain(Bd, at2(-0.06, 0.072), S(0.095, 0.16, 0.072)), INK, BLACK, 0.5);          // upper bowl
+      draw(MESH.halfRing, chain(Bd, at2(-0.06, -0.07), S(0.11, 0.16, 0.078)), INK, BLACK, 0.5);           // lower bowl
+      draw(MESH.ring, chain(B, T(0, -0.3, 0.0), S(0.515, 0.7, 0.47)), GOLD, scaleV(GOLD, 0.1), 0.8);
+    }
+    for (const sx of [-1, 1]) {
+      const open = o.open * reduce;
+      const Hh = chain(B, T(sx * HINGE[0], HINGE[1] + 0.008 * br, HINGE[2]), RZ(sx * open * 0.6), RX(open * 0.45),
+                       T(sx * (HALF_C[0] - HINGE[0]), HALF_C[1] - HINGE[1], HALF_C[2] - HINGE[2]));
+      draw(MESH.sphere, chain(Hh, S(HALF[0] * (1 + 0.01 * br), HALF[1], HALF[2] * (1 + 0.012 * br))), RED, BLACK, 0.95,
+           { spots: { dirs: SPOTS_BY_SIDE[sx], mirror: 1 } });
+      if (o.open > 0.05) {
+        const flap = Math.sin(t * 28) * 0.35 * reduce;
+        draw(MESH.sphere, chain(B, T(sx * 0.16, 0.75, -0.5), RZ(-sx * (0.9 + flap) * o.open), RX(0.5), T(0, 0.6, 0), S(0.28, 0.66, 0.025)),
+             WING, scaleV(col, 0.15), 1.0, { alpha: 0.42 * Math.min(1, o.open * 2) });
+      }
+    }
+
+    // head: big and round, shiny eyes with two highlights, blush, smile (or frown)
+    const nk = o.neck || 0;  // lifts the head clear of the shell top when lying back
+    const H = chain(B, T(0, 1.22 + nk, 0.08 + nk * 0.6), RY(o.headYaw), RZ(o.headTilt), RX(o.headPitch));
+    out.mouth = xf(H, MOUTH);
+    draw(MESH.sphere, chain(H, S(0.62, 0.56, 0.56)), HEAD, BLACK, 0.75);
+    const blink = st === "done" ? 0.2 : (o.blink ?? 1);
+    const [gx, gy] = o.gaze || [0, 0];
+    const eyeY = st === "done" ? 0.11 : st === "stuck" ? 0.02 : 0.07;
+    if (suit) {   // the mask (shaped, with eye holes), knotted at the back with two tails
+      const M = chain(H, T(0, eyeY - 0.07, 0));
+      draw(MASK_MESH, M, MASK_C, BLACK, 0.15, { rim: [0.12, 0.12, 0.15] });
+      const knot = [0, 0.09, -0.6];
+      draw(MESH.sphere, chain(M, T(...knot), S(0.09, 0.075, 0.06)), MASK_C, BLACK, 0.15, { rim: [0.12, 0.12, 0.15] });
+      for (const k of [-1, 1]) {   // the tails flutter, harder when it flies
+        let prev = xf(M, knot);
+        for (let j = 1; j <= 4; j++) {
+          const wave = Math.sin(t * (6 + 5 * (o.spd || 0)) - j * 1.2 + k) * 0.03 * j * (0.4 + Math.min(1.5, o.spd || 0)) * reduce;
+          const q = xf(M, [k * (0.04 + 0.05 * j) + wave * 0.5, 0.09 - 0.05 * j, -0.6 - 0.08 * j + wave]);
+          draw(MESH.cyl, segM(prev, q, 0.026 * ks), MASK_C, BLACK, 0.15, { rim: [0.12, 0.12, 0.15] }); prev = q;
+        }
+      }
+    }
+    // eyes: through the mask they are narrower and slanted (inner corners down): watchful, a little mysterious
+    const ez = suit ? 0.04 : 0, eh = suit ? 0.55 : 1;
+    for (const sx of [-1, 1]) {
+      // pupils follow the gaze; the highlights mostly stay put (they reflect the light, not the look)
+      const px = sx * 0.22 + gx * 0.045, py = eyeY + gy * 0.035 * blink * eh, hx = sx * 0.22 + gx * 0.012;
+      const E = chain(H, T(0, 0, ez), T(sx * 0.22, eyeY, 0), RZ(suit ? sx * 0.22 : 0), T(-sx * 0.22, -eyeY, 0));
+      draw(MESH.sphere, chain(E, T(sx * 0.22, eyeY, 0.42), S(suit ? 0.16 : 0.17, 0.21 * blink * eh, 0.12)), EYE, BLACK, 0.9);
+      if (suit)   // a heavy upper lid: the mask's edge over the eye, for the narrowed, watchful look
+        draw(MESH.sphere, chain(E, T(sx * 0.22, eyeY + 0.085 * eh, 0.425), S(0.185, 0.075, 0.125)), MASK_C, BLACK, 0.15, { rim: [0.12, 0.12, 0.15] });
+      draw(MESH.sphere, chain(E, T(px - sx * 0.01, py - 0.02 * eh, 0.51), S(0.095, 0.115 * blink * eh, 0.045)), DARK, scaleV(col, 0.3), 1.0);
+      draw(MESH.sphere, chain(E, T(hx + 0.035, eyeY + 0.03 * eh, 0.555), S(0.036 * blink * eh)), EYE, scaleV(EYE, 0.8), 0);
+      if (!suit) {
+        draw(MESH.sphere, chain(E, T(hx - 0.027, eyeY - 0.055, 0.55), S(0.016 * blink)), EYE, scaleV(EYE, 0.8), 0);
+        draw(MESH.sphere, chain(H, T(sx * 0.38, -0.14, 0.37), S(0.09, 0.05, 0.035)), CHEEK, scaleV(CHEEK, 0.35), 0.2);
+      }
+    }
+    draw(MESH.smile, o.sad ? chain(H, T(0, -0.24, 0.52), RX(-Math.PI / 2), S(0.08))
+                     : suit ? chain(H, T(0.06, -0.14, 0.53), RZ(0.3), RX(Math.PI / 2), S(0.07, 0.07, 0.05))   // smirk
+                           : chain(H, T(0, -0.12, 0.535), RX(Math.PI / 2), S(st === "done" || o.shades > 0.5 ? 0.115 : 0.09)),
+         CHEEK, scaleV(CHEEK, 0.25), 0.3);
+    if (o.talk > 0.02 && !o.sad)   // speaking: the mouth opens with the loudness of the voice
+      draw(MESH.sphere, chain(H, T(suit ? 0.06 : 0, -0.155, 0.515), S(0.07, 0.01 + 0.055 * o.talk, 0.03)), DARK, BLACK, 0.1);
+    if (o.shades > 0.01) {  // sunglasses: two glossy lenses, a bridge and temples (scaled in by o.shades)
+      const g = o.shades;
+      for (const sx of [-1, 1]) {
+        draw(MESH.sphere, chain(H, T(sx * 0.22, 0.08, 0.6), S(0.2 * g, 0.15 * g, 0.05)), SHADES, scaleV(SEA, 0.12), 1.0);
+        if (g > 0.6) draw(MESH.cyl, segM(xf(H, [sx * 0.41, 0.11, 0.55]), xf(H, [sx * 0.58, 0.13, 0.05]), 0.018), SHADES, BLACK, 0.8);
+      }
+      if (g > 0.6) draw(MESH.cyl, segM(xf(H, [-0.05, 0.12, 0.64]), xf(H, [0.05, 0.12, 0.64]), 0.02), SHADES, BLACK, 0.8);
+    }
+    updateAntennae(H);
+    for (const sx of [-1, 1]) {
+      // thinking: a deliberate twiddle; otherwise only a faint drift, the spring does the rest
+      const wig = st === "thinking" ? Math.sin(t * 6 + sx) * 0.16 * reduce : nz(t * 0.8, sx * 3) * 0.04 * reduce;
+      const a = life.ant[sx];
+      const Aa = chain(H, T(sx * 0.16, 0.45, 0.05), RZ(-sx * (0.4 + wig + o.droop) + a.s), RX(-0.2 + a.f));
+      draw(MESH.cyl, chain(Aa, T(0, 0.27, 0), S(0.022, 0.55, 0.022)), LIMB);
+      draw(MESH.sphere, chain(Aa, T(0, 0.58, 0), S(0.07)), col, scaleV(col, o.pulse * 0.7), 0.6);
+      draw(MESH.sphere, chain(Aa, T(0, 0.58, 0), S(0.2)), BLACK, scaleV(col, o.pulse), 0,
+           { mode: 2, alpha: Math.min(0.9, 0.45 * o.pulse) });  // a soft glow at rest, bright only when it matters
+    }
+    if (o.thinkDots) for (let n = 0; n < 3; n++) {
+      const a = t * 2.4 + n * 2.094, P = chain(B, T(Math.cos(a) * 0.42, 2.6 + Math.sin(t * 3 + n) * 0.05, Math.sin(a) * 0.42));
+      draw(MESH.sphere, chain(P, S(0.06)), col, scaleV(col, 1.0), 0.5);
+      draw(MESH.sphere, chain(P, S(0.16)), BLACK, col, 0, { mode: 2, alpha: 0.7 });
+    }
+
+    // legs and four arms, all by IK toward their targets
+    for (const sx of [-1, 1]) {
+      const fe = limb(xf(B, HIP(sx)), xf(B, o.feet[sx]), 0.3 * ks, 0.34 * ks, xd(B, [0, 0.2, 1]), 0.05 * ks, LIMB);
+      draw(MESH.sphere, chain(at(B, fe), T(0, 0, 0.05), S(0.1, 0.055, 0.15)), suit ? GOLD : LIMB, BLACK, 0.5);   // boots
+      const h = o.hands[sx];
+      const rk = h.reach || 1;   // a cartoon stretch for a long point (1 = the normal arm)
+      out[sx] = limb(xf(B, SHOULDER(sx)), xf(B, h.up), 0.28 * ks * rk, 0.28 * ks * rk, xd(B, [sx * 0.6, -0.5, -0.6]), 0.045 * ks, LIMB);
+      draw(MESH.sphere, chain(T(...out[sx]), S((suit ? 0.085 : 0.075) * ks)), suit ? GOLD : LIMB, st === "waiting" && sx === 1 ? scaleV(col, 0.5) : BLACK, 0.5);
+      const lo = limb(xf(B, SHOULDER2(sx)), xf(B, h.low), 0.26 * ks, 0.26 * ks, xd(B, [sx * 0.7, -0.4, -0.5]), 0.04 * ks, LIMB);
+      draw(MESH.sphere, chain(T(...lo), S((suit ? 0.075 : 0.065) * ks)), suit ? GOLD : LIMB, BLACK, 0.5);   // gloves
+    }
+    if (hero > 0.02) drawCape(B, o);
+    if (o.shield > 0.02) {   // blocked: a red force field in front of the crossed arms, flashing and fading
+      const F = chain(B, T(0, 0.7, 1.05));
+      draw(MESH.sphere, chain(F, S(0.95, 0.95, 0.2)), BLACK, hex("#ff4d4d"), 0, { mode: 2, alpha: 0.95 * o.shield });
+      draw(MESH.sphere, chain(F, S(0.9, 0.9, 0.16)), hex("#ff6b6b"), scaleV(hex("#ff4d4d"), 0.6), 0.9, { alpha: 0.18 * o.shield });
+    }
+
+    // held props (scaled in/out with their state)
+    if (o.crate > 0.02) {
+      const C = chain(B, T(...CRATE_AT), S(o.crate));
+      draw(MESH.box, chain(C, S(CRATE_HALF[0] * 2, CRATE_HALF[1] * 2, CRATE_HALF[2] * 2)), CRATE, BLACK, 0.2);
+      draw(MESH.box, chain(C, T(0, CRATE_HALF[1] - 0.005, 0), S(CRATE_HALF[0] * 2 + 0.02, 0.03, CRATE_HALF[2] * 2 + 0.02)), scaleV(CRATE, 0.7), BLACK, 0.2);
+      draw(MESH.box, chain(C, T(0, 0, CRATE_HALF[2] + 0.002), S(0.12, CRATE_HALF[1] * 2, 0.005)), scaleV(CRATE, 0.75), BLACK, 0.1);  // tape
+    }
+    if (o.paper > 0.02) {
+      const P = chain(B, T(...PAPER_AT), RX(PAPER_TILT), S(o.paper));
+      draw(MESH.box, chain(P, S(PAPER_HALF[0] * 2, PAPER_HALF[1] * 2, 0.012)), PAPER, BLACK, 0.1);
+      for (let l = 0; l < 5; l++)  // text lines on the side facing the bug (-z), mirrored so they read left to right for it
+        draw(MESH.box, chain(P, T(0.03 - (l % 2) * 0.02, 0.2 - l * 0.1, -0.009), S(0.34 - (l % 2) * 0.08, 0.02, 0.004)), hex("#9aa3b5"), BLACK, 0);
+    }
+    return out;
+  }
+
+  // ---- scenes. Work: a city rooftop at night, the hero's base. Chill: a beach island with a sunbed.
+  const Y0 = -1.2;
+  function shadow(G, x, z, sx = 0.7, sz = 0.5, a = 0.6, y = 0) {
+    draw(MESH.cyl, chain(G, T(x, Y0 + y + 0.004, z), S(sx, 0.002, sz)), BLACK, BLACK, 0, { mode: 1, alpha: a });
+  }
+  const HOME = [0, 0.15];   // where the hero stands: the landing pad
+  const ROOF = hex("#3a4258"), LEDGE = hex("#4d5873"), TOWER = hex("#1d2643"), WIN = hex("#ffd27a"), MOON = hex("#f4efd8"),
+        BEACON = hex("#ff3b3b");
+  // the skyline is fixed: a seeded random, so it is the same every frame and every visit
+  const rnd = (() => { let x = 7; return () => (x = (x * 16807) % 2147483647) / 2147483647; })();
+  const SKYLINE = Array.from({ length: 15 }, (_, i) => {
+    const w = 0.7 + rnd() * 0.6, h = 1.6 + rnd() * 3.0, row = i % 3, wins = [];
+    for (let r = 0; r < 8; r++) for (let c = 0; c < 3; c++) if (rnd() < 0.35 && h - 0.35 - r * 0.42 > 0.3) wins.push([c, r]);
+    return { x: -8 + i * 1.15 + rnd() * 0.3, z: -6.5 - row * 1.3, w, h, d: 0.8, wins, shade: 0.75 + row * 0.12 };
+  });
+  // the work loop: off the roof, out over the street, round and up over the skyline, back past the roof
+  const LOOP = { cz: -3.5, rx: 5.2, rz: 5.5 };
+  const loopPoint = (a) => [LOOP.rx * Math.sin(a), Y0 + 1.5 + 4.7 * (1 - Math.cos(a)) / 2 + 0.3 * Math.sin(2 * a), LOOP.cz + LOOP.rz * Math.cos(a)];
+  const FLY_T = 5.2, WHIRL_T = 2.4, WIND_C = hex("#cfeaff");
+  const FRONT_WINDOWS = [];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 8; c++) FRONT_WINDOWS.push([-2.24 + c * 0.64, Y0 - 0.55 - r * 0.75, rnd() < 0.45]);
+  const STARS = Array.from({ length: 26 }, () => [(rnd() * 2 - 1) * 9, 1.4 + rnd() * 4.5, -13 - rnd() * 3, rnd() * 6]);
+  function drawCity(G, t) {
+    // night sky: a moon with a halo, twinkling stars
+    draw(MESH.sphere, chain(G, T(-3.4, 3.8, -11), S(0.5)), MOON, scaleV(MOON, 1.1), 0);
+    draw(MESH.sphere, chain(G, T(-3.4, 3.8, -11), S(1.4)), BLACK, MOON, 0, { mode: 2, alpha: 0.5 });
+    for (const [x, y, z, ph] of STARS) draw(MESH.sphere, chain(G, T(x, y, z), S(0.025 + 0.012 * Math.sin(t * 2 + ph))), MOON, scaleV(MOON, 1.2), 0);
+    // skyline: dark towers with a few lit windows
+    for (const b of SKYLINE) {
+      draw(MESH.box, chain(G, T(b.x, Y0 - 3 + (b.h + 3) / 2, b.z), S(b.w, b.h + 3, b.d)), scaleV(TOWER, b.shade), BLACK, 0.1);
+      for (const [c, r] of b.wins)
+        draw(MESH.box, chain(G, T(b.x + (c - 1) * b.w * 0.28, Y0 + b.h - 0.35 - r * 0.42, b.z + b.d / 2 + 0.01), S(0.12, 0.16, 0.01)), WIN, scaleV(WIN, 0.9), 0);
+    }
+    // the roof: flat top, low parapet, a stair hut, a vent, an antenna with a blinking light, the landing pad
+    draw(MESH.box, chain(G, T(0, Y0 - 1.6, -0.1), S(5.6, 3.2, 2.8)), ROOF, BLACK, 0.15);
+    draw(MESH.box, chain(G, T(0, Y0 - 1.6, 1.305), S(5.6, 3.2, 0.01)), scaleV(ROOF, 0.6), BLACK, 0.1);   // front wall
+    for (const [x, y, lit] of FRONT_WINDOWS)
+      draw(MESH.box, chain(G, T(x, y, 1.315), S(0.3, 0.4, 0.01)), lit ? WIN : scaleV(TOWER, 0.8), lit ? scaleV(WIN, 0.8) : BLACK, 0.3);
+    draw(MESH.box, chain(G, T(0, Y0 + 0.08, 1.24), S(5.6, 0.16, 0.12)), LEDGE, BLACK, 0.2);
+    for (const sx of [-1, 1]) draw(MESH.box, chain(G, T(sx * 2.74, Y0 + 0.08, -0.1), S(0.12, 0.16, 2.8)), LEDGE, BLACK, 0.2);
+    draw(MESH.box, chain(G, T(-2.0, Y0 + 0.5, -1.0), S(0.9, 1.0, 0.7)), LEDGE, BLACK, 0.2);
+    draw(MESH.box, chain(G, T(-2.0, Y0 + 0.4, -0.64), S(0.36, 0.7, 0.02)), scaleV(ROOF, 0.6), BLACK, 0.1);
+    draw(MESH.cyl, chain(G, T(-0.9, Y0 + 0.18, -1.05), S(0.16, 0.36, 0.16)), LEDGE, BLACK, 0.4);
+    draw(MESH.cyl, segM(xf(G, [2.1, Y0, -0.95]), xf(G, [2.1, Y0 + 2.3, -0.95]), 0.035), LEDGE, BLACK, 0.5);
+    const on = (t % 1.6) < 0.18;
+    draw(MESH.sphere, chain(G, T(2.1, Y0 + 2.35, -0.95), S(0.07)), BEACON, scaleV(BEACON, on ? 1.5 : 0.2), 0.5);
+    if (on) draw(MESH.sphere, chain(G, T(2.1, Y0 + 2.35, -0.95), S(0.3)), BLACK, BEACON, 0, { mode: 2, alpha: 0.8 });
+    draw(MESH.ring, chain(G, T(HOME[0], Y0 + 0.004, HOME[1]), S(0.6, 0.12, 0.6)), GOLD, scaleV(GOLD, 0.12), 0.2);
+  }
+  // DECISION: the bed is sized to the bug (it used to be about the bug's size, so it sat on top of it)
+  // DECISION: the bug and the bed shrink together (BEACH_K), so the bed fits on the island with sand all round
+  //   and the lying pose (designed at bed scale 2) stays exactly as it was.
+  const BEACH_EYE = [0.5, 3.3, 12.8], BEACH_AT = [-0.1, -0.05, 0];   // the beach camera: wide, the whole island
+  const BEACH_K = 0.7, BUG_K = 0.6;   // bed scale (vs the original 2.0 bed), the bug's size at the beach
+  const BED = { pos: [0.65, Y0, 0.25], yaw: -0.5, back: -0.8, pivot: [0, 0.37, -0.6], scale: 2.0 * BEACH_K };
+  // DECISION: a natural palm, about 1.5x the old one: the frond shape (rise, arch, droop), leaflet lengths and the
+  //   coconut cluster follow a real coconut palm, so it no longer reads as a green umbrella.
+  const PALM_BASE = [-2.15, 0, -0.8];   // island-local, y from the ground (Y0)
+  function palmGeom(t) {
+    const g = { trunk: [], fronds: [], coconuts: [], fallen: [] };
+    let p = [PALM_BASE[0], Y0 + PALM_BASE[1], PALM_BASE[2]];
+    g.trunk.push([p, 0.13]);
+    for (let i = 0; i < 12; i++) {   // slender, leaning out toward the sunbed, then curving up to the crown
+      const q = add(p, [0.17 - i * 0.016, 0.21 + i * 0.006, 0.02]);
+      g.trunk.push([q, 0.115 - i * 0.004]);
+      p = q;
+    }
+    const top = p, sway = (f, sp = 1) => Math.sin(t * 0.6 * sp + f * 1.3);
+    g.top = top;
+    // seen almost from the side (the camera is about 1.44 rad from the palm): a gap in front keeps the coconuts visible
+    const CAM_A = 1.44, GAP = 0.6;
+    for (let f = 0; f < 11; f++) {   // the lower tier: long fronds arching out and down
+      const a = CAM_A + GAP + f / 10 * (Math.PI * 2 - 2 * GAP) + 0.07 * Math.sin(f * 3.7) + 0.04 * sway(f);
+      g.fronds.push({ a, shape: f % 2, L: 1.85 + 0.2 * Math.sin(f * 2.3), tilt: 0.05 * sway(f + 7, 1.3), tint: 1 + 0.06 * Math.sin(f * 1.7) });
+    }
+    for (let f = 0; f < 7; f++) {    // the young tier: shorter fronds reaching up from the middle
+      const a = f / 7 * Math.PI * 2 + 0.4 + 0.04 * sway(f + 20);
+      g.fronds.push({ a, shape: 2, L: 1.3 + 0.12 * Math.sin(f * 1.9), tilt: 0.08 * sway(f + 30, 1.6), tint: 1.06 });
+    }
+    g.fronds.push({ a: CAM_A + 2.4, shape: 3, L: 1.3, tilt: 0.03 * sway(40), tint: 1, old: true });   // an old one hanging
+    for (const fr of g.fronds) {   // the spine of each frond (the same arch as its mesh), for the stalk and the checks
+      const [rise, droop] = FROND_SHAPES[fr.shape], dir = [Math.cos(fr.a), 0, Math.sin(fr.a)];
+      fr.spine = [];
+      for (let j = 0; j <= 10; j++) {
+        const u = j / 10;
+        fr.spine.push(add(top, add(sc(dir, u * fr.L * (1 - 0.15 * u)), [0, fr.L * (rise * u - droop * u * u + fr.tilt * u), 0])));
+      }
+    }
+    // coconuts: a cluster just under the crown, in the gap facing the camera
+    for (const [ang, dy, r] of [[1.2, -0.1, 0.22], [1.45, -0.13, 0.24], [1.7, -0.1, 0.22], [0.98, -0.14, 0.2],
+                                [1.32, -0.27, 0.2], [1.6, -0.27, 0.2]])
+      g.coconuts.push([add(top, [Math.cos(ang) * r, dy, Math.sin(ang) * r]), 0.14]);
+    g.fallen.push([[PALM_BASE[0] + 0.55, Y0 + 0.07, PALM_BASE[2] + 0.55], 0.11], [[PALM_BASE[0] + 0.78, Y0 + 0.07, PALM_BASE[2] + 0.3], 0.1]);
+    return g;
+  }
+  function drawPalm(G, t) {
+    const g = palmGeom(t), k = len(xd(G, [1, 0, 0]));
+    const W = (q) => xf(G, q);
+    draw(MESH.sphere, chain(G, T(...g.trunk[0][0]), S(0.26, 0.14, 0.26)), TRUNK_D, BLACK, 0.15);   // bulbous base
+    draw(MESH.sphere, chain(G, T(...add(g.trunk[0][0], [0.05, 0.12, 0])), S(0.19, 0.16, 0.19)), TRUNK, BLACK, 0.15);
+    for (let i = 1; i < g.trunk.length; i++) {
+      const [a, ra] = g.trunk[i - 1], [b, rb] = g.trunk[i];
+      draw(MESH.cyl, segM(W(a), W(b), (ra + rb) / 2 * k), TRUNK, BLACK, 0.2);
+      draw(MESH.sphere, chain(T(...W(b)), S(rb * k * 1.02)), TRUNK, BLACK, 0.2);   // smooth joints
+      if (i % 2 === 0) {   // soft rings where old leaves fell
+        const d = sc(sub(b, a), 0.025 / len(sub(b, a)));
+        draw(MESH.cyl, segM(W(sub(b, d)), W(add(b, d)), rb * 1.06 * k), TRUNK_D, BLACK, 0.2);
+      }
+    }
+    draw(MESH.sphere, chain(G, T(...add(g.top, [0, 0.03, 0])), S(0.13, 0.12, 0.13)), PALM_D, BLACK, 0.3);   // the crown
+    for (const fr of g.fronds) {
+      for (let j = 1; j < 4; j++)   // the bare stalk (the leaflets start at a quarter of the frond)
+        draw(MESH.cyl, segM(W(fr.spine[j - 1]), W(fr.spine[j]), 0.02 * (1 - j / 12) * k), fr.old ? FROND_OLD : PALM_D, BLACK, 0.3);
+      // frond-local x along dir = (cos a, 0, sin a): a turn of -a about y; the wind tilts it a little
+      draw(MESH.fronds[fr.shape], chain(G, T(...g.top), RY(-fr.a), RZ(fr.tilt), S(fr.L)),
+           [fr.tint, fr.tint, fr.tint], BLACK, 0.3);
+    }
+    for (const [c, r] of g.coconuts.concat(g.fallen)) {
+      const i = Math.round(c[0] * 37 + c[2] * 11);
+      draw(MESH.sphere, chain(G, T(...c), S(r, r * 0.92, r)), i % 3 ? COCO : COCO_G, BLACK, 0.35);
+    }
+    // beach grass around the base
+    for (let n = 0; n < 9; n++) {
+      const a = n * 2.4, b0 = [PALM_BASE[0] + Math.cos(a) * 0.38, Y0, PALM_BASE[2] + Math.sin(a) * 0.38 + 0.12];
+      const tip = add(b0, [Math.cos(a) * 0.12 + Math.sin(t * 1.2 + n) * 0.02, 0.22 + (n % 3) * 0.05, Math.sin(a) * 0.06]);
+      draw(MESH.cyl, segM(W(b0), W(tip), 0.012 * k), GRASS, BLACK, 0.3);
+    }
+    shadow(G, PALM_BASE[0] + 0.55, PALM_BASE[2] + 0.1, 1.4, 0.7, 0.35);
+  }
+  // DECISION: the shark wanders round the island rather than riding a track: its pace drifts (from a near-stop glide
+  //   to a slow cruise), its distance from the island drifts in and out, its line weaves a little, and now and then
+  //   it dives for a few seconds and comes up further along. All smooth functions of time (no randomness), so every
+  //   frame rate and the checks see the same swim. Still slow: at most ~0.45 units/s, always outside the shallows.
+  const SHARK = { rx: 5.5, rz: 4.5, cz: 0.1, lap: 150 };
+  const SHARK_CYCLE = 600;   // the wander repeats after this long (the checks sample all of it)
+  const SEA_Y = Y0 - 0.075;
+  function sharkAt(t) {
+    const w = (Math.PI * 2) / SHARK.lap;
+    // pace: the angle advances at w, plus slow surges and lulls (their slope never exceeds w, so it never swims back)
+    const th = 0.6 + w * t + 0.14 * Math.sin(0.1 * t + 1) + 0.055 * Math.sin(0.23 * t + 2.5);
+    // distance from the island: drifting in and out, with a small weave on top
+    const k = 1 + 0.06 * Math.sin(0.09 * t + 1) + 0.035 * Math.sin(0.21 * t + 2) + 0.012 * Math.sin(0.4 * t);
+    const pos = [SHARK.rx * k * Math.cos(th), SHARK.cz + SHARK.rz * k * Math.sin(th)];
+    // the odd dive: when two slow waves line up (a few times per lap, several seconds each)
+    const dive = Math.sin(0.12 * t + 0.7) * Math.sin(0.047 * t + 2.1);
+    return { pos, depth: smooth(0.62, 0.8, dive) };
+  }
+  function drawShark(G, t) {
+    const now = sharkAt(t), next = sharkAt(t + 0.25);
+    if (now.depth > 0.99) return;
+    const dx = next.pos[0] - now.pos[0], dz = next.pos[1] - now.pos[1];
+    const head = Math.atan2(dz, dx), up = 1 - now.depth;   // heading in the water; how far out of it the fin is
+    const bob = Math.sin(t * 0.9) * 0.012, sway = Math.sin(t * 1.3) * 0.06;
+    const SIZE = 1.8;   // readable at the beach camera's distance
+    const base = [now.pos[0], SEA_Y - 0.44 * SIZE * (1 - up) + bob, now.pos[1]];
+    const F = chain(G, T(...base), RY(-head + sway * 0.3), RX(sway * 0.15), S(SIZE));
+    draw(MESH.fin, F, SHARK_C, BLACK, 0.55);
+    // (no separate tail tip above the water: at this distance it read as a second shark fin)
+    // the body as a dark shape just under the surface, and a soft wake
+    draw(MESH.sphere, chain(F, T(-0.3, -0.18, 0), RY(Math.sin(t * 1.3) * 0.08), S(1.0, 0.12, 0.26)), hex("#1d3f57"), BLACK, 0.2,
+         { alpha: 0.42 * up });
+    for (const sd of [-1, 1])
+      draw(MESH.sphere, chain(F, T(-0.55, -0.01, sd * 0.16), RY(sd * 0.35), S(0.42, 0.012, 0.035)), FOAM, scaleV(FOAM, 0.3), 0.2,
+           { alpha: 0.4 * up });
+    draw(MESH.sphere, chain(F, T(0.2, -0.01, 0), S(0.12, 0.012, 0.07)), FOAM, scaleV(FOAM, 0.3), 0.2, { alpha: 0.45 * up });
+  }
+  function drawBeach(G, t, bs) {
+    // deep water far out, the sea, turquoise shallows round the island (a slow shimmer on each)
+    draw(MESH.cyl, chain(G, T(0, Y0 - 0.1, -9), S(30, 0.02, 14)), DEEP, scaleV(DEEP, 0.05 + 0.03 * Math.sin(t * 0.6)), 0.9);
+    draw(MESH.cyl, chain(G, T(0, Y0 - 0.085, -1.5), S(18, 0.02, 12)), SEA, scaleV(SEA, 0.08 + 0.04 * Math.sin(t * 0.8)), 0.9);
+    draw(MESH.cyl, chain(G, T(0, Y0 - 0.075, 0.1), S(4.6, 0.02, 3.4)), SHALLOW, scaleV(SHALLOW, 0.1 + 0.05 * Math.sin(t * 0.9 + 1)), 0.9);
+    // a distant island on the horizon
+    draw(MESH.sphere, chain(G, T(5.5, Y0 - 0.05, -14), S(2.6, 0.45, 0.9)), ISLET, scaleV(SKYTINT, 0.25), 0.1);
+    // wet sand at the waterline, dry sand on top, foam that washes in and out
+    draw(MESH.sphere, chain(G, T(0, Y0 - 0.115, 0.1), S(3.38, 0.13, 2.38)), WET_SAND, BLACK, 0.25);
+    draw(MESH.sphere, chain(G, T(0, Y0 - 0.1, 0.1), S(3.2, 0.14, 2.2)), SAND, BLACK, 0.05);
+    const wash = Math.sin(t * 0.9);
+    draw(MESH.ring, chain(G, T(0, Y0 - 0.065, 0.1), S(3.42 + 0.05 * wash, 0.5, 2.42 + 0.05 * wash)), FOAM, scaleV(FOAM, 0.25 + 0.1 * wash), 0.3);
+    draw(MESH.ring, chain(G, T(0, Y0 - 0.07, 0.1), S(3.75 - 0.04 * wash, 0.12, 2.75 - 0.04 * wash)), FOAM, scaleV(FOAM, 0.1), 0.3,
+         { alpha: 0.18 + 0.12 * wash });
+    // small things on the sand: shells, pebbles, a starfish
+    for (const [x, z, r, c] of [[1.9, 1.35, 0.06, SHELL], [-0.9, 1.55, 0.05, SHELL], [2.4, -0.2, 0.05, SHELL],
+                                [-1.4, 0.9, 0.07, PEBBLE], [1.25, 1.75, 0.05, PEBBLE], [-0.4, -1.2, 0.06, PEBBLE]])
+      draw(MESH.sphere, chain(G, T(x, Y0 + 0.03, z), RY(x * 3), S(r, r * 0.45, r * 0.8)), c, BLACK, 0.4);
+    for (let a = 0; a < 5; a++)
+      draw(MESH.sphere, chain(G, T(-0.6, Y0 + 0.035, 1.75), RY(a * Math.PI * 2 / 5 + 0.3), T(0, 0, 0.07), S(0.035, 0.02, 0.08)), STAR, BLACK, 0.3);
+    // sun: glowing disc with a big soft halo
+    draw(MESH.sphere, chain(G, T(-3.2, 3.9, -9), S(0.55)), SUN, scaleV(SUN, 1.3), 0);
+    draw(MESH.sphere, chain(G, T(-3.2, 3.9, -9), S(1.6)), BLACK, SUN, 0, { mode: 2, alpha: 0.8 });
+    drawPalm(G, t);
+    drawShark(G, t);
+    // sunbed: legs, slatted seat, reclined backrest, striped cushion
+    const Bd = chain(G, T(...BED.pos), RY(BED.yaw), S(BED.scale));
+    for (const x of [-0.42, 0.42]) for (const z of [-0.6, 0.95]) draw(MESH.cyl, chain(Bd, T(x, 0.17, z), S(0.025, 0.34, 0.025)), WOOD, BLACK, 0.3);
+    draw(MESH.box, chain(Bd, T(0, 0.34, 0.17), S(0.92, 0.05, 1.6)), WOOD, BLACK, 0.3);
+    const Bk = chain(Bd, T(...BED.pivot), RX(BED.back));
+    draw(MESH.box, chain(Bk, T(0, 0.65, -0.03), S(0.92, 1.3, 0.05)), WOOD, BLACK, 0.3);
+    for (let i = 0; i < 6; i++) draw(MESH.box, chain(Bd, T(0, 0.385, -0.48 + i * 0.27), S(0.86, 0.05, 0.27)), i % 2 ? STRIPE_B : STRIPE_A, BLACK, 0.2);
+    for (let i = 0; i < 5; i++) draw(MESH.box, chain(Bk, T(0, 0.1 + i * 0.25, 0.02), S(0.86, 0.25, 0.05)), i % 2 ? STRIPE_B : STRIPE_A, BLACK, 0.2);
+    shadow(G, BED.pos[0], BED.pos[2] + 0.25 * BEACH_K, 1.1 * BEACH_K, 1.4 * BEACH_K, 0.45);
+    return chain(G, T(...BED.pos), RY(BED.yaw), T(...sc(BED.pivot, BED.scale)), RX(BED.back));  // unscaled backrest frame for the bug
+  }
+  // the bug lies back on the backrest: up = how far up the backrest its body sits, out = its distance from the
+  // backrest (shell depth), so the shell rests on the cushion and the hips sit just above the seat
+  // up/out measured with tests/ui/beach_checks.js: the shell rests on the seat cushion and settles ~0.02 into the backrest
+  const LIE = { neck: 0.16, pitch: 0.42, up: 0.26, out: 0.84 };
+  const FLY_S = 5.1;   // the trip from the roof to lying on the sunbed, in seconds
+  const lieFrame = (G, t) => chain(G, T(...BED.pos), RY(BED.yaw), T(...sc(BED.pivot, BED.scale)), RX(BED.back),
+                                   T(0, (LIE.up + Math.sin(t * 1.4) * 0.008 * reduce) * BEACH_K, LIE.out * BUG_K), S(BUG_K));
+  // feet resting on the seat cushion a little in front of each hip, as body-local points of the lying bug
+  // (computed from the frames themselves, so they touch the seat whatever the bed size or pose)
+  function lieFeet() {
+    const B = lieFrame(I(), 0), Bd = chain(T(...BED.pos), RY(BED.yaw), S(BED.scale));
+    const out = {};
+    for (const sx of [-1, 1]) {
+      const hb = toBody(Bd, xf(B, HIP(sx)));
+      out[sx] = toBody(B, xf(Bd, [hb[0] * 0.9, 0.41 + 0.03, hb[2] + 0.3]));
+    }
+    return out;
+  }
+  const lieHands = () => ({
+    [-1]: { up: [-0.48, 0.48, 0.6], low: [-0.52, -0.15, 0.2] },   // upper left holds the cocktail
+    1:    { up: [0.6, 0.12, 0.3], low: [0.52, -0.15, 0.2] },      // the rest lie on the cushion
+  });
+  // a world point in the frame of B (rotation + uniform scale), so IK targets can come from world positions
+  const toBody = (B, w) => { const d = sub(w, xf(B, [0, 0, 0])), ax = xd(B, [1, 0, 0]), ay = xd(B, [0, 1, 0]), az = xd(B, [0, 0, 1]);
+    return [dot(d, ax) / dot(ax, ax), dot(d, ay) / dot(ay, ay), dot(d, az) / dot(az, az)]; };
+  const GLASS_OFF = [0.07, 0.02, 0.05], STRAW_BASE = [0.015, 0.02, 0], STRAW_TIP = [0.06, 0.3, -0.02];
+  function drawCocktail(hand, B, bs, mouth = null, sip = 0) {
+    const g = add(hand, xd(B, GLASS_OFF)), M = chain(T(...g), S(bs));
+    draw(MESH.cyl, chain(M, T(0, 0.06, 0), S(0.06, 0.13, 0.06)), DRINK, scaleV(DRINK, 0.15), 0.6);
+    draw(MESH.sphere, chain(M, T(0, 0.13, 0), S(0.06, 0.012, 0.06)), hex("#ffd166"), BLACK, 0.6);             // foam on top
+    const base = xf(M, STRAW_BASE);
+    let tip = xf(M, STRAW_TIP);
+    if (mouth && sip > 0) {  // straw swings to the lips; never longer than a real straw
+      const d = sub(lerpV(tip, mouth, sip), base), L = len(d), maxL = 0.36 * bs;
+      tip = add(base, sc(d, Math.min(1, maxL / (L || 1))));
+    }
+    draw(MESH.cyl, segM(base, tip, 0.01 * bs), PARASOL, BLACK, 0.4);   // straw
+    const st0 = xf(M, [-0.02, 0.09, -0.02]), st1 = xf(M, [-0.075, 0.27, -0.055]);
+    draw(MESH.cyl, segM(st0, st1, 0.006 * bs), WOOD, BLACK, 0.2);   // parasol stick
+    const P = chain(M, T(-0.075, 0.27, -0.055), RZ(0.3), RX(-0.15));
+    for (let w = 0; w < 8; w++)   // striped canopy: eight panels
+      draw(MESH.wedge, chain(P, RY(w * Math.PI / 4), S(0.15, 0.055, 0.15)), w % 2 ? STRIPE_A : PARASOL, scaleV(PARASOL, 0.06), 0.5);
+    draw(MESH.sphere, chain(P, T(0, 0.02, 0), S(0.009)), WOOD, BLACK, 0.3);   // bead on top
+    draw(MESH.cyl, chain(M, T(0.065, 0.135, 0), RZ(1.1), S(0.045, 0.012, 0.045)), LIME, BLACK, 0.5);
+    draw(MESH.cyl, chain(M, T(0, 0.075, 0), S(0.07, 0.17, 0.07)), GLASS, scaleV(GLASS, 0.05), 1.0, { alpha: 0.28 });  // glass last: translucent
+  }
+
+  // ---- state-dependent targets (lerped every frame so transitions are smooth)
+  const POSE = {  //  headPitch shellOpen
+    idle:     [0.0,  0.0], thinking: [-0.12, 0.0], reading: [0.22, 0.0], moving: [0.0, 0.0],
+    waiting:  [-0.08, 0.0], denied: [0.05, 0.0], done: [-0.2, 0.0], stuck: [0.38, 0.0],
+  };
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0.25 : 1;
+  const angLerp = (a, b, k) => wrapA(a + wrapA(b - a) * k);  // result stays in [-π, π): laps never accumulate
+  const cur = { color: STATES.idle.color.slice(), pose: POSE.idle.slice(), chill: 1, crate: 0, talk: 0, paper: 0, shield: 0, fly: null, restT: -10,
+                p: null, v: [0, 0, 0], yaw: -0.3, pitch: 0, roll: 0, wide: 0,
+                hands: { 1: handTargets("idle", 0, 1), [-1]: handTargets("idle", 0, -1) }, reach: { 1: 1, [-1]: 1 } };
+  let lastT = 0;
+  const hero = { clock: 0, ph: 0, wp: -1, env: 0 };   // flight loop clock and phase, whirlwind progress
+  const stage = $("stage");
+
+  // DECISION: the drawing resolution follows the frame rate. why -> almost all the cost is filling pixels (the
+  //   script takes ~1 ms a frame); a full-screen window on a high-DPI display is ~6x the pixels of a small one and
+  //   stutters. So: at most ~2.4 MP, and lower (down to 55%) while frames come slower than ~45/s, back up when fast.
+  const MAX_PX = 2.4e6, perf = { q: 1, acc: 0, n: 0, wait: 0, last: 0 };
+  function adapt(now) {   // real time between frames (the animation's own step is capped, so it can't tell)
+    const gap = (now - perf.last) / 1000;
+    perf.last = now;
+    if (dbg.manual || document.hidden) { perf.acc = perf.n = 0; return; }
+    adaptGap(gap);
+  }
+  function adaptGap(gap) {   // one frame's real duration in seconds (separate, so the checks can feed it)
+    if (gap <= 0 || gap > 0.25) { perf.acc = perf.n = 0; return; }   // paused or in the background
+    perf.acc += gap; perf.n++;
+    if (perf.acc < 1) return;   // judge once a second
+    const avg = perf.acc / perf.n;
+    perf.acc = perf.n = 0;
+    if (perf.wait > 0) { perf.wait--; return; }
+    if (avg > 1 / 45 && perf.q > 0.55) { perf.q = Math.max(0.55, perf.q * 0.85); perf.wait = 2; }
+    else if (avg < 1 / 57 && perf.q < 1) { perf.q = Math.min(1, perf.q * 1.08); perf.wait = 4; }
+  }
+  // a frame narrower than 7:5 widens the view instead of cutting the scenery off at the sides
+  const fovFor = (aspect) => 2 * Math.atan(Math.tan(0.31) * Math.max(1, 1.4 / aspect));
+  function resize() {
+    const css = Math.max(1, canvas.clientWidth * canvas.clientHeight);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(MAX_PX / css)) * perf.q;
+    const w = Math.max(1, Math.floor(canvas.clientWidth * dpr)), h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    gl.viewport(0, 0, w, h);
+    VP = mul(persp(fovFor(w / h), w / h, 0.1, 60), lookAt(CAM, CAM_AT, [0, 1, 0]));
+  }
+
+  gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.clearColor(0, 0, 0, 0);
+
+  // ?debug=1: read-only access to the simulation, so the cape can be measured while the page runs
+  // (tests/ui/cape_checks.js drives the states through apply() and checks the cloth every frame)
+  // manual mode: the browser's frame loop stops rendering and advance() renders frames at a fixed rate of
+  // simulated time, so measurements don't depend on how fast (or throttled) the browser runs
+  const dbg = { manual: false };
+  if (params.has("debug")) window.__avatar = { cloth, cur, hero, toBody, collar, HS, get links() { return cloth.links; },
+    NU: CAPE_NU, NV: CAPE_NV, LEN: CAPE_LEN,
+    LIE, BED, BEACH_EYE,
+    beach(t = 0) {
+      const B = lieFrame(I(), t), Bd = chain(T(...BED.pos), RY(BED.yaw), S(BED.scale));
+      const Bk = chain(Bd, T(...BED.pivot), RX(BED.back));
+      // points on both shell halves and the head (body-local ellipsoids), in world space
+      const pts = [];
+      for (const sx of [-1, 1]) for (let i = 0; i < 12; i++) for (let j = 1; j < 8; j++) {
+        const th = i / 12 * 2 * Math.PI, ph = j / 8 * Math.PI;
+        pts.push(xf(B, [sx * HALF_C[0] + HALF[0] * Math.sin(ph) * Math.cos(th), HALF_C[1] + HALF[1] * Math.cos(ph),
+                        HALF_C[2] + HALF[2] * Math.sin(ph) * Math.sin(th)]));
+      }
+      const feet = lieFeet();
+      return { body: pts, bodyInBed: pts.map((w) => toBody(Bd, w)), bodyInBack: pts.map((w) => toBody(Bk, w)),
+               feetInBed: [-1, 1].map((sx) => toBody(Bd, xf(B, feet[sx]))),
+               bedCorners: [[-0.46, 0, -0.6], [0.46, 0, -0.6], [-0.46, 0, 0.97], [0.46, 0, 0.97]].map((c) => xf(Bd, c))
+                 .concat([[-0.46, 1.3, 0], [0.46, 1.3, 0]].map((c) => xf(Bk, c))),
+               palm: [PALM_BASE[0], Y0, PALM_BASE[2]], palmGeom: palmGeom(0), sharkAt, SHARK_CYCLE, SEA_Y, sand: { cx: 0, cz: 0.1, rx: 3.2, rz: 2.2 }, Y0,
+               cam: BEACH_EYE, at: BEACH_AT, fov: 0.62,
+               project(w, aspect) { const m = mul(persp(0.62, aspect, 0.1, 60), lookAt(BEACH_EYE, BEACH_AT, [0, 1, 0]));
+                 const x = m[0] * w[0] + m[4] * w[1] + m[8] * w[2] + m[12], y = m[1] * w[0] + m[5] * w[1] + m[9] * w[2] + m[13],
+                       ww = m[3] * w[0] + m[7] * w[1] + m[11] * w[2] + m[15];
+                 return [x / ww, y / ww]; } };
+    },
+    get bug() { return dbg.bug; }, get fly() { return cur.fly; }, get quality() { return perf.q; },
+    feedFrames(ms, count) { for (let i = 0; i < count; i++) adaptGap(ms / 1000); return perf.q; },
+    manual(on) { dbg.manual = !!on; simNow = on ? performance.now() : null; },
+    advance(seconds, each, fps = 60) {
+      for (let i = 0; i < Math.round(seconds * fps); i++) { simNow += 1000 / fps; render(simNow); if (each) each(); }
+    } };
+
+  function frame(now) {
+    if (!dbg.manual) render(now);
+    requestAnimationFrame(frame);
+  }
+
+  function render(now) {
+    resize();
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const t = now / 1000, dt = Math.min(0.05, Math.max(0, t - lastT)), st = ui.state, age = (now - ui.since) / 1000;
+    lastT = t; frameDt = dt; adapt(now);
+    const k = 1 - Math.pow(0.0015, 1 / 60);  // ~frame-rate independent enough at 60fps
+    const blink = blinkAmount(t), breath = Math.sin(t * (st === "thinking" ? 2.1 : 1.65));
+    updateGaze(t, st, dt);
+    const gaze = life.gaze;
+    cur.pose = lerpV(cur.pose, POSE[st], k * 1.6);
+    cur.color = lerpV(cur.color, STATES[st].color, k * 2);
+    const [headPitch, shellOpen] = cur.pose, col = cur.color;
+    rimNow = col; gl.uniform3fv(U.uRim, col); gl.uniform3fv(U.uSpotColor, SPOT); gl.uniform1f(U.uSpotCos, 0.965);
+
+    // chilling = idle, or a while after finishing. Going to chill from work is a short flight
+    // (lift off the roof, hover while the scenes swap, glide down onto the sunbed); back to work is a quick "poof".
+    const chillTarget = st === "idle" || (st === "done" && age > 6) ? 1 : 0;
+    if (chillTarget && !cur.fly && cur.chill < 0.02) cur.fly = { t0: t, p0: (cur.p || [HOME[0], Y0 + HIP_H * HS, HOME[1]]).slice(), yaw0: cur.yaw };
+    if (!chillTarget && cur.fly) cur.fly = null;
+    const fs = cur.fly ? Math.min(FLY_S, t - cur.fly.t0) : 0;   // seconds into the trip to the beach
+    let workS, beachS;
+    if (cur.fly) {
+      cur.chill = smooth(0.76, 2.28, fs);
+      workS = 1 - smooth(0.95, 1.71, fs); beachS = smooth(1.52, 2.28, fs);
+    } else {
+      cur.chill = lerp(cur.chill, chillTarget, k * 0.7);
+      workS = Math.min(1, Math.max(0, (0.5 - cur.chill) * 2)); beachS = Math.min(1, Math.max(0, (cur.chill - 0.5) * 2));
+    }
+    const ease = (x) => 1 - Math.pow(1 - x, 3);
+    stage.style.setProperty("--chill", cur.chill.toFixed(3));
+    // camera: close on the roof; wide and slowly swinging round while the hero flies its loop (it stays wide
+    // until the hero is back on the pad); the beach view when chilling
+    const home = [HOME[0], Y0 + HIP_H * HS, HOME[1]];
+    // an approval waiting in the chat panel: the hero hops over to the edge of the view next to the panel and points
+    // at it; the trip back to the pad counts as part of it (the camera stays close for both)
+    const presenting = ui.point && st === "waiting";
+    if (presenting) cur.trip = true;
+    else if (cur.trip && (!cur.p || len(sub(cur.p, home)) < 0.3 || st === "moving")) cur.trip = false;
+    let spot = home;
+    if (presenting) {
+      const R = norm(cross(norm(sub(CAM_AT, CAM)), [0, 1, 0]));
+      const half = Math.tan(0.31) * len(sub(home, CAM)) * (canvas.width / Math.max(1, canvas.height));   // half the view's width there
+      const off = Math.max(0.6, Math.min(1.7, half - 0.8));   // room left for the pointing arm
+      spot = [clampN(home[0] + R[0] * off, 2.3), home[1], home[2] + R[2] * off];
+    }
+    const away = !!cur.p && len(sub(cur.p, home)) > 1.0 && !cur.trip;
+    cur.wide = lerp(cur.wide, (st === "moving" || away) && !cur.fly ? 1 : 0, 1 - Math.exp(-dt * 1.1));
+    const wd = smooth(0, 1, cur.wide), orb = 0.5 * Math.sin(t * 0.11);
+    const roofEye = [0, Y0 + 2.3, 7.4], roofAt = [0, Y0 + 0.85, 0];
+    const wideEye = [Math.sin(orb) * 16, Y0 + 6.5, LOOP.cz + Math.cos(orb) * 16];
+    const wideAt = lerpV([0, Y0 + 2.4, LOOP.cz], cur.p || roofAt, 0.6);
+    CAM = lerpV(lerpV(roofEye, wideEye, wd), BEACH_EYE, cur.chill);
+    CAM_AT = lerpV(lerpV(roofAt, wideAt, wd), BEACH_AT, cur.chill);
+    resize();
+    gl.uniformMatrix4fv(U.uVP, false, VP); gl.uniform3fv(U.uCam, CAM);
+    const pulse = st === "waiting" ? (Math.sin(t * 10) > 0 ? 1.6 : 0.3) : st === "thinking" ? 0.9 + 0.6 * Math.sin(t * 5) : 1.0;
+    const sad = st === "denied" || st === "stuck";
+    // the voice's loudness (set by the chat script while an answer is spoken), also while lying on the sunbed
+    cur.talk = lerp(cur.talk, Math.min(1, window.__talk || 0), 1 - Math.exp(-dt * 30));
+
+    if (workS > 0) {
+      const G = chain(T(0, Y0, 0), S(ease(workS)), T(0, -Y0, 0));
+      drawCity(G, t);
+      // the hero moves on a critically damped spring toward a target that depends on the state: moving files =
+      // the big flight loop with a whirlwind every half lap; otherwise on the pad (thinking stays on the ground).
+      // DECISION: a big loop through the city, not laps on the roof. why -> laps read as pacing in circles.
+      let tgt = (presenting ? spot : home).slice(), omega = 4;
+      if (st === "moving") {
+        hero.clock += dt * reduce;
+        const cyc = hero.clock % (FLY_T + WHIRL_T);
+        hero.wp = cyc > FLY_T ? (cyc - FLY_T) / WHIRL_T : -1;   // whirlwind progress 0..1, or -1 while flying
+        hero.env = hero.wp < 0 ? 0 : smooth(0, 0.15, hero.wp) * (1 - smooth(0.85, 1, hero.wp));
+        hero.ph += dt * reduce * 0.55 * (1 - Math.min(1, hero.env * 1.5));   // it stops on the spot to spin
+        tgt = loopPoint(hero.ph);
+        omega = 3.2;
+      } else { hero.wp = -1; hero.env = lerp(hero.env, 0, k * 3); }
+      if (st === "done") tgt[1] += 0.25 * smooth(0, 0.8, age);
+      else if (st === "stuck") tgt[1] -= 0.3 * HS;
+      else if (st === "denied") tgt[2] -= 0.15 * Math.exp(-age * 2.5);   // knocked back a little by the block
+      if (!cur.p || beachS > 0.99) { cur.p = tgt.slice(); cur.v = [0, 0, 0]; }   // (re)appearing after the beach
+      if (st !== "moving") {   // going somewhere on the roof (to the panel side and back): a little hop, not a slide
+        const far = Math.hypot(cur.p[0] - tgt[0], cur.p[2] - tgt[2]);
+        tgt[1] += Math.min(0.4, far * 0.5);
+      }
+      const prevV = cur.v;
+      cur.v = add(cur.v, sc(sub(sc(sub(tgt, cur.p), omega * omega), sc(cur.v, 2 * omega)), dt));
+      cur.p = add(cur.p, sc(cur.v, dt));
+      const acc = dt > 0 ? sc(sub(cur.v, prevV), 1 / dt) : [0, 0, 0];
+      const hs = Math.hypot(cur.v[0], cur.v[2]), whirl = hero.env;
+      if (whirl > 0.02) cur.yaw = wrapA(cur.yaw + dt * 17 * whirl * reduce);   // the whirlwind: a fast spin on the spot
+      // whenever it travels (also flying back to the pad) it faces where it goes, so the cape trails behind
+      else cur.yaw = angLerp(cur.yaw, hs > 0.4 ? Math.atan2(cur.v[0], cur.v[2]) : -0.3, 1 - Math.exp(-dt * (hs > 0.4 ? 8 : 5)));
+      // pointing at the chat panel: the side of the screen it is on, in the hero's own frame (camera right, turned by -yaw)
+      let pdir = null, pside = 1;
+      if (ui.point && st === "waiting") {
+        const R = norm(cross(norm(sub(CAM_AT, CAM)), [0, 1, 0])), c = Math.cos(cur.yaw), s = Math.sin(cur.yaw);
+        pdir = norm([c * R[0] - s * R[2], 0, s * R[0] + c * R[2]]);
+        pside = pdir[0] >= 0 ? 1 : -1;
+      }
+      const right = [Math.cos(cur.yaw), 0, -Math.sin(cur.yaw)];   // lean into the flight, bank into turns; toward the panel
+      cur.pitch = lerp(cur.pitch, st === "stuck" ? 0.25 : Math.min(0.45, hs * 0.18) * (1 - whirl), 1 - Math.exp(-dt * 4));
+      cur.roll = lerp(cur.roll, clampN(-dot(acc, right) * 0.12, 0.6) * (1 - whirl) - (pdir ? 0.13 * pside : 0), 1 - Math.exp(-dt * 4));
+      const height = (cur.p[1] - home[1]) / HS, air = smooth(0.06, 0.35, height);
+      const hover = Math.sin(t * 1.8) * 0.03 * HS * air * reduce;
+      cur.look = lerp(cur.look || 0, pdir ? Math.max(-0.6, Math.min(0.6, Math.atan2(pdir[0], pdir[2]) * 0.45)) : 0, k * 2);
+      let headYaw = gaze[0] * 0.18 + nz(t * 0.6, 2) * 0.05 * reduce + cur.look, headTilt = nz(t * 0.6, 1) * 0.04 * reduce;
+      const extraPitch = -gaze[1] * 0.08 + nz(t * 0.5, 7) * 0.03 * reduce - cur.pitch * 0.6;   // in flight: look ahead
+      if (st === "thinking") headTilt += Math.sin(t * 1.6) * 0.1 * reduce;
+      if (st === "denied") headYaw += Math.sin(age * 20) * 0.3 * Math.exp(-age * 2.2) * reduce;
+      for (const sx of [-1, 1]) {
+        let tg = whirl > 0.3 ? { up: [sx * 0.85, 0.75, 0.05], low: [sx * 0.8, -0.05, 0.05] } : handTargets(st, t, sx);   // arms out to spin
+        if (pdir && sx === pside)   // the arm on the panel's side points at it, tapping the air a little
+          // (the arm stretches to ~1.7x for this, so it reaches well past the shell, a little up and forward)
+          tg = { up: [pdir[0] * 1.22, 0.74 + Math.sin(t * 6) * 0.04 * reduce, pdir[2] * 1.22 + 0.62], low: tg.low };
+        cur.reach[sx] = lerp(cur.reach[sx], pdir && sx === pside ? 1.7 : 1, k * 1.8);
+        cur.hands[sx] = { up: lerpV(cur.hands[sx].up, tg.up, k * 1.8), low: lerpV(cur.hands[sx].low, tg.low, k * 1.8),
+                          reach: cur.reach[sx] };
+      }
+      cur.crate = lerp(cur.crate, st === "moving" && whirl < 0.3 ? 1 : 0, k * 2);
+      cur.paper = lerp(cur.paper, st === "reading" ? 1 : 0, k * 2);
+      cur.shield = st === "denied" ? Math.min(1, age * 6) * (0.8 + 0.2 * Math.sin(age * 18)) * Math.max(0.35, Math.exp(-age * 0.8))
+                                   : lerp(cur.shield, 0, k * 3);
+      // feet: planted on the roof (one knee down when stuck), trailing back in flight (body units)
+      const feet = {};
+      for (const sx of [-1, 1]) {
+        const groundY = (Y0 - cur.p[1]) / HS + 0.055;
+        const planted = st === "stuck" ? [sx * 0.2, groundY, sx > 0 ? 0.34 : -0.2] : [sx * 0.2, groundY, 0.08];
+        const trailing = [sx * 0.15, -1.02 + Math.sin(t * 3 + sx) * 0.03 * reduce, -0.1 - 0.08 * sx * Math.sin(t * 2) * reduce];
+        feet[sx] = lerpV(planted, trailing, air);
+      }
+      if (hero.wp >= 0) {   // the whirlwind: a spinning funnel, and loose papers swept up in a spiral and gone
+        const c = cur.p, q = hero.wp;
+        for (let i = 0; i < 6; i++) {
+          const f = i / 5, R = (0.4 + f * 1.1) * (0.4 + 0.6 * whirl);
+          draw(MESH.ring, chain(G, T(c[0], c[1] - 0.95 + f * 1.9, c[2]), RY(t * 9 + i), S(R, 0.35, R)), BLACK, WIND_C, 0,
+               { mode: 2, alpha: 0.4 * whirl });
+        }
+        for (let i = 0; i < 14; i++) {
+          const pi = Math.min(1, Math.max(0, q * 1.5 - i * 0.035)), a = i * 2.4 + pi * 10;
+          const r = (1 - pi) * 2.0 + 0.15, sz = (1 - smooth(0.8, 1, pi)) * smooth(0, 0.08, q) * 1.5;
+          if (sz > 0.01) draw(MESH.box, chain(G, T(c[0] + Math.cos(a) * r, c[1] - 1.1 * (1 - pi), c[2] + Math.sin(a) * r), RY(a * 1.3), RX(a),
+                                                S(0.2 * sz, 0.006, 0.15 * sz)), PAPER, scaleV(PAPER, 0.15), 0.2);
+        }
+      }
+      if (!cur.fly) {
+        const overRoof = Math.abs(cur.p[0]) < 2.75 && cur.p[2] > -1.5 && cur.p[2] < 1.3;
+        if (overRoof) shadow(G, cur.p[0], cur.p[2], Math.max(0.1, (0.62 - height * 0.25) * HS), Math.max(0.08, (0.45 - height * 0.18) * HS),
+                             Math.max(0.1, 0.55 - height * 0.3));
+        const B = chain(G, T(cur.p[0], cur.p[1] + hover + breath * 0.008 * HS * reduce * (1 - air), cur.p[2]),
+                        RY(cur.yaw), RX(cur.pitch), RZ(cur.roll), S(HS));
+        drawBug(B, { col, st, t, open: shellOpen, headYaw, headTilt, headPitch: headPitch + extraPitch, hands: cur.hands, feet,
+                     crate: cur.crate, paper: cur.paper, shades: 0, sad, pulse, talk: cur.talk, droop: sad ? 0.7 : 0, thinkDots: st === "thinking",
+                     blink, gaze, breath, hero: 1, shield: cur.shield, spd: len(cur.v) / HS });
+      }
+    }
+
+    // sips every 7 s, counted from settling on the bed (the first ~4 s after landing), so landing never cuts into one
+    const sipT = (t - cur.restT + 3) % 7, sip = sipT < 1.8 ? Math.sin(Math.PI * sipT / 1.8) : 0;
+    if (beachS > 0) {
+      const bs = ease(beachS), G = chain(T(0, Y0, 0), S(bs), T(0, -Y0, 0));
+      drawBeach(G, t, bs);
+      if (!cur.fly) {  // lying back on the sunbed, head tipped toward the viewer; sips every few seconds
+        const B = lieFrame(G, t);
+        dbg.bug = B;
+        const headYaw = Math.sin(t * 0.4) * 0.12 * reduce * (1 - sip), headTilt = 0.08 * (1 - sip), headPitch = LIE.pitch + 0.1 * sip;
+        // where the lips will be this frame, then the glass placed so its straw ends there
+        const Hb = chain(T(0, 1.22 + LIE.neck, 0.08 + LIE.neck * 0.6), RY(headYaw), RZ(headTilt), RX(headPitch));
+        const mouthW = xf(B, xf(Hb, MOUTH));
+        const glassW = sub(mouthW, sc(STRAW_TIP, bs * BUG_K));
+        const hands = lieHands();
+        hands[-1] = { ...hands[-1], up: lerpV(hands[-1].up, toBody(B, sub(glassW, xd(B, GLASS_OFF))), sip) };
+        const out = drawBug(B, { col, st: "idle", t, open: 0, neck: LIE.neck, headYaw, headTilt, headPitch,
+                                 hands, feet: lieFeet(), crate: 0, paper: 0, shades: 1, sad: false, talk: cur.talk,
+                                 pulse: 1, droop: 0.15, thinkDots: false, blink, gaze, breath: breath * 0.6 });
+        drawCocktail(out[-1], B, bs * BUG_K, out.mouth, sip);
+      }
+    }
+
+    if (cur.fly) {
+      // in seconds: rise off the roof (0-1.15), hover while the scenes swap (1.15-2.1), glide in and touch down
+      // standing on the seat (2.1-3.4), take the weight (3.4-3.8), then sit back onto the backrest (3.8-5.1).
+      // The last frame is exactly the resting pose (same frame, feet, hands, head), so nothing jumps after it.
+      const { p0, yaw0 } = cur.fly, pH = [0, 0.95, 0.7], s = fs;
+      const L = lieFrame(I(), t), pL = xf(L, [0, 0, 0]), lf = lieFeet(), lh = lieHands();
+      const footW = { [-1]: xf(L, lf[-1]), 1: xf(L, lf[1]) };   // where the feet rest on the seat (world)
+      const STAND = HIP_H - 0.055;   // body origin above the soles when standing (body units)
+      const pS = add(sc(add(footW[-1], footW[1]), 0.5), [0, STAND * BUG_K, 0]);   // standing on the seat
+      const size = lerp(HS, BUG_K, smooth(1.14, 2.09, s));   // the city size to the beach size
+      let pos, yaw, tilt = 0, glide = 0, touch = 0, back = 0;
+      if (s < 1.15) {
+        const e = smooth(0, 1, s / 1.15);
+        pos = lerpV(p0, pH, e); pos[1] += Math.sin(Math.PI * e) * 0.35; yaw = angLerp(yaw0, -0.35, e);
+      } else if (s < 2.1) {
+        const h = (s - 1.15) / 0.95;
+        pos = [pH[0] + Math.sin(h * Math.PI * 2) * 0.12, pH[1] + Math.sin(h * Math.PI * 4) * 0.06, pH[2]];
+        yaw = -0.35 + Math.sin(h * Math.PI * 2) * 0.15;
+      } else {
+        glide = smooth(2.1, 3.4, s);
+        // a curve that comes in above the seat and lowers onto it slowing down (no sideways slide at the end)
+        const b0 = pH, b1 = add(pH, [0, 0.2, 0]), b2 = add(pS, [0, 0.5, 0]), b3 = pS, u = glide, v = 1 - u;
+        pos = [0, 1, 2].map((i) => v * v * v * b0[i] + 3 * v * v * u * b1[i] + 3 * v * u * u * b2[i] + u * u * u * b3[i]);
+        yaw = angLerp(-0.35, BED.yaw, smooth(2.1, 3.1, s));
+        touch = s < 3.4 ? 0 : Math.sin(Math.PI * Math.min(1, (s - 3.4) / 0.4));   // knees give a little, then up
+        pos[1] -= touch * 0.06 * BUG_K;
+        if (s > 3.8) {   // sit back: the hips go back and down while the body leans onto the backrest
+          back = smooth(3.8, 5.1, s);
+          pos = lerpV(pS, pL, smooth(0, 0.9, back));
+          pos[1] -= Math.sin(Math.PI * back) * 0.04 * BUG_K;   // a soft sink into the cushion on the way
+          tilt = BED.back * smooth(0.08, 1, back);
+        }
+      }
+      const B = chain(T(...pos), RY(yaw), RX(tilt), S(size));
+      dbg.bug = B;   // for the landing checks
+      const dangle = (sx) => ({ up: [sx * 0.55, 0.15 + Math.sin(t * 9 + sx) * 0.05, 0.3], low: [sx * 0.5, -0.3, 0.3] });
+      const balance = (sx) => ({ up: [sx * 0.7, 0.32, 0.25], low: [sx * 0.62, -0.08, 0.25] });   // arms out on touchdown
+      const reach = smooth(0.45, 0.95, glide), hands = {}, feet = {};
+      for (const sx of [-1, 1]) {
+        const d = dangle(sx), bl = balance(sx), arm = (part) => lerpV(lerpV(d[part], bl[part], reach), lh[sx][part], back);
+        hands[sx] = { up: arm("up"), low: arm("low") };
+        const trail = [sx * 0.18, -1.0 + Math.sin(t * 8 + sx * 2) * 0.06, 0.25];
+        // legs reach down before touchdown; from then on the feet stay where they landed while the body moves
+        feet[sx] = s < 3.4 ? lerpV(trail, [sx * 0.2, -STAND, 0.08], reach) : toBody(B, footW[sx]);
+      }
+      const height = Math.max(0, pos[1] - (Y0 + HIP_H));
+      if (s < 3.4) shadow(I(), pos[0], pos[2], Math.max(0.15, 0.6 - height * 0.25), Math.max(0.1, 0.45 - height * 0.2),
+                          Math.max(0.1, 0.5 - height * 0.3) * (1 - glide));
+      const settle = Math.sin(t * 0.4) * 0.12 * reduce * back;   // the resting pose's slow head turn, faded in
+      const out = drawBug(B, { col, st: "idle", t, open: 0, headYaw: settle, headTilt: 0.08 * back,
+                               headPitch: lerp(lerp(-0.1, 0.12, reach), LIE.pitch, back), neck: LIE.neck * back, hands, feet,
+                               crate: 0, paper: 0, shades: smooth(0.55, 1, back), sad: false, talk: cur.talk, pulse: 1, droop: 0.15 * back,
+                               thinkDots: false, blink, gaze: lerpV([0, 0.2], gaze, back), breath: breath * 0.6 * back,
+                               hero: 1 - smooth(1.33, 2.66, s) });
+      const glass = smooth(0.75, 1, back);
+      if (glass > 0.01) drawCocktail(out[-1], B, glass * BUG_K, out.mouth, 0);
+      if (s >= FLY_S) { cur.fly = null; cur.chill = 1; cur.restT = t; }
+    }
+
+    flushLater();
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
