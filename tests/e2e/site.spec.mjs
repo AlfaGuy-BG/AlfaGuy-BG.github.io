@@ -138,10 +138,13 @@ test("link previews (LinkedIn, Slack, Teams) get a title, description and a 1200
   expect(await og("title")).toContain("Georgi Krastev");
   expect((await og("description")).length).toBeGreaterThan(40);
   const img = new URL(await og("image"));
-  expect(img.href).toBe("https://alfaguy-bg.github.io/og.png");
+  expect(img.origin + img.pathname).toBe("https://alfaguy-bg.github.io/og.png");
   const r = await request.get(img.pathname);
   expect(r.status()).toBe(200);
   const b = await r.body();
   expect(b.subarray(1, 4).toString()).toBe("PNG");
   expect([b.readUInt32BE(16), b.readUInt32BE(20)]).toEqual([1200, 627]);
+  // the ?v= in the URL must be this image's hash, or LinkedIn keeps showing an older picture
+  const { createHash } = await import("node:crypto");
+  expect(img.searchParams.get("v"), "run npm run og").toBe(createHash("sha256").update(b).digest("hex").slice(0, 8));
 });

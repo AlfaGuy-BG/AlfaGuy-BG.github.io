@@ -2,7 +2,8 @@
 //   npm run og            (after npm run fonts; then look at site/og.png before committing)
 // The ladybug is live in the card; the shot is taken at a fixed moment of its demo run.
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join, normalize, extname, sep } from "node:path";
 import { chromium } from "@playwright/test";
 
@@ -30,8 +31,20 @@ try {
   await page.waitForTimeout(AT_MS);
   if (failed.length) throw new Error(`card resources failed (run npm run fonts?):\n${failed.join("\n")}`);
   await page.screenshot({ path: "site/og.png" });
-  console.log("site/og.png written (1200x627). Look at it before committing.");
+  const v = await stampVersion();
+  console.log(`site/og.png written (1200x627), og:image version ${v}. Look at it before committing.`);
 } finally {
   await browser.close();
   server.close();
+}
+
+// LinkedIn and others cache preview images by URL: a new image needs a new URL.
+// The version is the first 8 hex digits of the PNG's SHA-256, so it changes exactly when the image does.
+async function stampVersion() {
+  const v = createHash("sha256").update(await readFile("site/og.png")).digest("hex").slice(0, 8);
+  const html = await readFile("site/index.html", "utf8");
+  const re = /(<meta property="og:image" content="https:\/\/alfaguy-bg\.github\.io\/og\.png)(\?v=[0-9a-f]+)?(">)/;
+  if (!re.test(html)) throw new Error("og:image meta tag not found in site/index.html");
+  await writeFile("site/index.html", html.replace(re, `$1?v=${v}$3`));
+  return v;
 }
